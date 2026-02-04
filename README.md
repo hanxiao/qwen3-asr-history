@@ -12,17 +12,16 @@ git clone https://github.com/hanxiao/qwen3-asr-history ~/Documents/qwen3-asr-his
 cd ~/Documents/qwen3-asr-history && ./setup.sh
 ```
 
-**CLI** - transcribe audio files directly.
+**CLI** - transcribe audio files (language auto-detected).
 ```bash
-bin/qwen3-asr recording.ogg        # Chinese (default)
-bin/qwen3-asr recording.ogg en     # English
+bin/qwen3-asr recording.ogg
 ```
 
 **API** - POST audio path for transcription.
 ```bash
 curl -X POST http://127.0.0.1:18321/transcribe \
   -H "Content-Type: application/json" \
-  -d '{"path": "/path/to/audio.ogg", "language": "zh"}'
+  -d '{"path": "/path/to/audio.ogg"}'
 ```
 
 **UI** - browse history at http://127.0.0.1:18321/history

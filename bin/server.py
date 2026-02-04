@@ -79,7 +79,7 @@ def save_to_history(audio_path: str, text: str, latency_ms: float, audio_duratio
 
 class TranscribeRequest(BaseModel):
     path: str
-    language: str = "zh"
+    language: str = None  # None = auto-detect
 
 class TranscribeResponse(BaseModel):
     text: str

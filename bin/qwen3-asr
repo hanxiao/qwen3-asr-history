@@ -1,16 +1,15 @@
 #!/bin/bash
-# Qwen3-ASR wrapper
-# Usage: qwen3-asr <audio_file> [language]
+# Qwen3-ASR wrapper - language auto-detected
+# Usage: qwen3-asr <audio_file>
 # Tries persistent server first, falls back to cold start
 
 PROJECT_DIR="$HOME/Documents/qwen3-asr-history"
 AUDIO_FILE="$1"
-LANGUAGE="${2:-zh}"
 SERVER_URL="http://127.0.0.1:18321"
 
 if [ -z "$AUDIO_FILE" ]; then
     echo "Error: No audio file provided" >&2
-    echo "Usage: qwen3-asr <audio_file> [language]" >&2
+    echo "Usage: qwen3-asr <audio_file>" >&2
     exit 1
 fi
 
@@ -20,7 +19,7 @@ AUDIO_FILE=$(cd "$(dirname "$AUDIO_FILE")" && pwd)/$(basename "$AUDIO_FILE")
 # Try the server first (warm path)
 RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$SERVER_URL/transcribe" \
     -H "Content-Type: application/json" \
-    -d "{\"path\": \"$AUDIO_FILE\", \"language\": \"$LANGUAGE\"}" \
+    -d "{\"path\": \"$AUDIO_FILE\"}" \
     --connect-timeout 1 2>/dev/null)
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
@@ -47,7 +46,6 @@ cd "$PROJECT_DIR"
     --model mlx-community/Qwen3-ASR-0.6B-bf16 \
     --audio "$WAV_FILE" \
     --output-path "$OUTPUT_FILE" \
-    --language "$LANGUAGE" \
     --format txt \
     2>/dev/null
 
