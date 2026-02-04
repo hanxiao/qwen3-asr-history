@@ -12,7 +12,7 @@ git clone https://github.com/hanxiao/qwen3-asr-history ~/Documents/qwen3-asr-his
 cd ~/Documents/qwen3-asr-history && ./setup.sh
 ```
 
-**CLI** - transcribe audio files (language auto-detected).
+**CLI** - transcribe audio files (defaults to Chinese, handles mixed Chinese/English).
 ```bash
 bin/qwen3-asr recording.ogg
 ```
