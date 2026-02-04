@@ -1087,41 +1087,46 @@ HISTORY_HTML = """
             // Skip refresh while audio is playing
             if (currentAudio && !currentAudio.paused) return;
 
-            const res = await fetch('/api/dates');
-            const dates = await res.json();
-
-            // Only update dates sidebar if changed
-            if (JSON.stringify(dates) !== JSON.stringify(knownDates)) {
-                knownDates = dates;
-                const container = document.getElementById('dates');
-                container.innerHTML = dates.map(d =>
-                    `<div class="date-item${d === currentDate ? ' active' : ''}" data-date="${d}">${d}</div>`
-                ).join('');
-                container.querySelectorAll('.date-item').forEach(el => {
-                    el.onclick = () => loadTranscripts(el.dataset.date);
-                });
-                document.getElementById('stat-total').textContent = dates.length + ' days';
-            }
-
-            // Check for new transcripts
-            if (currentDate) {
-                const res2 = await fetch(`/api/transcripts/${currentDate}`);
-                const records = await res2.json();
-                if (records.length > lastRecordCount) {
-                    lastRecordCount = records.length;
-                    await loadTranscripts(currentDate);
-                }
-            }
-
-            // Always update today stat
-            const now = new Date(); const today = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
             try {
+                const res = await fetch('/api/dates');
+                if (!res.ok) return;
+                const dates = await res.json();
+
+                // Only update dates sidebar if changed
+                if (JSON.stringify(dates) !== JSON.stringify(knownDates)) {
+                    knownDates = dates;
+                    const container = document.getElementById('dates');
+                    container.innerHTML = dates.map(d =>
+                        `<div class="date-item${d === currentDate ? ' active' : ''}" data-date="${d}">${d}</div>`
+                    ).join('');
+                    container.querySelectorAll('.date-item').forEach(el => {
+                        el.onclick = () => loadTranscripts(el.dataset.date);
+                    });
+                    document.getElementById('stat-total').textContent = dates.length + ' days';
+                }
+
+                // Check for new transcripts
+                if (currentDate) {
+                    const res2 = await fetch(`/api/transcripts/${currentDate}`);
+                    if (res2.ok) {
+                        const records = await res2.json();
+                        if (records.length > lastRecordCount) {
+                            lastRecordCount = records.length;
+                            await loadTranscripts(currentDate);
+                        }
+                    }
+                }
+
+                // Always update today stat
+                const now = new Date(); const today = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
                 const todayRes = await fetch(`/api/transcripts/${today}`);
                 if (todayRes.ok) {
                     const todayRecords = await todayRes.json();
                     document.getElementById('stat-today').textContent = todayRecords.length + ' items';
                 }
-            } catch (e) {}
+            } catch (e) {
+                // Network error - server may be restarting, ignore
+            }
         }
 
         // Model status and control functions
