@@ -1,82 +1,63 @@
 # Qwen3-ASR History
 
-Local speech-to-text transcription server using Qwen3-ASR on Apple Silicon via MLX. Keeps the model loaded in memory for fast inference and saves transcription history with audio files.
+Local speech-to-text server using Qwen3-ASR on Apple Silicon via MLX. Model stays loaded in memory for fast inference.
 
 ## Requirements
 
-- macOS with Apple Silicon (M1/M2/M3)
+- macOS with Apple Silicon
 - Python 3.12+
-- ffmpeg (for audio conversion)
+- ffmpeg
 
-## Installation
+## Install
 
 ```bash
-# Clone and setup
+git clone <repo> ~/Documents/qwen3-asr-history
 cd ~/Documents/qwen3-asr-history
 ./setup.sh
 ```
 
-This will:
-1. Create a Python virtual environment
-2. Install dependencies (mlx-audio, fastapi, uvicorn)
-3. Install the launchd service for automatic startup
-4. Symlink the wrapper script to ~/.local/bin/
+Server starts automatically at `http://127.0.0.1:18321`.
+
+## OpenClaw Setup
+
+In OpenClaw settings, set transcription to use local server:
+
+```
+Transcription URL: http://127.0.0.1:18321/transcribe
+```
+
+The server reads audio directly from OpenClaw's media folder (`~/.openclaw/media/inbound/`).
 
 ## Usage
 
-### CLI wrapper
+CLI:
+```bash
+qwen3-asr recording.ogg        # Chinese (default)
+qwen3-asr recording.ogg en     # English
+```
+
+API:
+```bash
+curl -X POST http://127.0.0.1:18321/transcribe \
+  -H "Content-Type: application/json" \
+  -d '{"path": "/path/to/audio.ogg", "language": "zh"}'
+```
+
+History UI: http://127.0.0.1:18321/history
+
+## Service
 
 ```bash
-# Transcribe audio file (Chinese by default)
-qwen3-asr recording.ogg
-
-# Specify language
-qwen3-asr recording.ogg en
+launchctl list | grep qwen3-asr                              # status
+launchctl unload ~/Library/LaunchAgents/ai.openclaw.qwen3-asr.plist  # stop
+launchctl load ~/Library/LaunchAgents/ai.openclaw.qwen3-asr.plist    # start
+tail -f ~/Documents/qwen3-asr-history/logs/server.log        # logs
 ```
 
-### API endpoints
+## Models
 
-The server runs on `http://127.0.0.1:18321`:
-
-- `GET /health` - Health check
-- `POST /transcribe` - Transcribe audio file
-  ```json
-  {"path": "/absolute/path/to/audio.ogg", "language": "zh"}
-  ```
-- `GET /history` - Web UI for browsing transcription history
-- `GET /api/dates` - List dates with transcripts
-- `GET /api/transcripts/{date}` - Get transcripts for a date
-- `GET /audio/{date}/{filename}` - Serve audio file
-
-### Service management
-
-```bash
-# Check service status
-launchctl list | grep qwen3-asr
-
-# Stop service
-launchctl unload ~/Library/LaunchAgents/ai.openclaw.qwen3-asr.plist
-
-# Start service
-launchctl load ~/Library/LaunchAgents/ai.openclaw.qwen3-asr.plist
-
-# View logs
-tail -f ~/Documents/qwen3-asr-history/logs/server.log
-```
-
-## Data
-
-Transcription history is stored in `./history/` with the following structure:
-
-```
-history/
-  2026-02-03/
-    transcripts.jsonl    # Transcript records
-    recording-001.ogg    # Original audio files
-    recording-002.ogg
-```
-
-Each line in `transcripts.jsonl`:
-```json
-{"timestamp": "2026-02-03T10:30:00", "audio_file": "recording-001.ogg", "text": "...", "duration_ms": 234.5}
-```
+Available models (switch via UI):
+- `mlx-community/Qwen3-ASR-0.6B-bf16` - fastest, default
+- `mlx-community/Qwen3-ASR-1.7B-8bit` - better quality
+- `mlx-community/whisper-large-v3-turbo-asr-fp16` - whisper turbo
+- `mlx-community/whisper-large-v3-asr-8bit` - whisper v3
