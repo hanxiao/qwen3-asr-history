@@ -79,7 +79,7 @@ def save_to_history(audio_path: str, text: str, latency_ms: float, audio_duratio
 
 class TranscribeRequest(BaseModel):
     path: str
-    language: str = None  # None = auto-detect
+    language: str = "zh"  # None = auto-detect
 
 class TranscribeResponse(BaseModel):
     text: str
@@ -199,7 +199,7 @@ async def transcribe(req: TranscribeRequest):
             output_path=output_path,
             format="txt",
             verbose=False,
-            language=req.language
+            language=req.language or "zh"
         )
 
         # Read the output
