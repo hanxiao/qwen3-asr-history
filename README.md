@@ -1,6 +1,6 @@
 # Qwen3-ASR History
 
-Local speech-to-text server using Qwen3-ASR on Apple Silicon via MLX. Model stays loaded in memory for fast inference.
+Local speech-to-text server using Qwen3-ASR on Apple Silicon via MLX. Model stays loaded in memory for fast inference (~120-200ms hot).
 
 ## Requirements
 
@@ -11,7 +11,7 @@ Local speech-to-text server using Qwen3-ASR on Apple Silicon via MLX. Model stay
 ## Install
 
 ```bash
-git clone <repo> ~/Documents/qwen3-asr-history
+git clone https://github.com/hanxiao/qwen3-asr-history ~/Documents/qwen3-asr-history
 cd ~/Documents/qwen3-asr-history
 ./setup.sh
 ```
@@ -20,20 +20,36 @@ Server starts automatically at `http://127.0.0.1:18321`.
 
 ## OpenClaw Setup
 
-In OpenClaw settings, set transcription to use local server:
+Add to `~/.openclaw/openclaw.json`:
 
-```
-Transcription URL: http://127.0.0.1:18321/transcribe
+```json
+{
+  "tools": {
+    "media": {
+      "audio": {
+        "enabled": true,
+        "models": [
+          {
+            "type": "cli",
+            "command": "~/Documents/qwen3-asr-history/bin/qwen3-asr",
+            "args": ["{{MediaPath}}"],
+            "timeoutSeconds": 60
+          }
+        ]
+      }
+    }
+  }
+}
 ```
 
-The server reads audio directly from OpenClaw's media folder (`~/.openclaw/media/inbound/`).
+The CLI wrapper calls the local server (fast) with fallback to cold start if server is down.
 
 ## Usage
 
 CLI:
 ```bash
-qwen3-asr recording.ogg        # Chinese (default)
-qwen3-asr recording.ogg en     # English
+bin/qwen3-asr recording.ogg        # Chinese (default)
+bin/qwen3-asr recording.ogg en     # English
 ```
 
 API:
@@ -56,8 +72,11 @@ tail -f ~/Documents/qwen3-asr-history/logs/server.log        # logs
 
 ## Models
 
-Available models (switch via UI):
+Available models (switch via environment or config):
 - `mlx-community/Qwen3-ASR-0.6B-bf16` - fastest, default
 - `mlx-community/Qwen3-ASR-1.7B-8bit` - better quality
-- `mlx-community/whisper-large-v3-turbo-asr-fp16` - whisper turbo
-- `mlx-community/whisper-large-v3-asr-8bit` - whisper v3
+
+## Performance
+
+- Cold start: ~3s (Python + model loading)
+- Hot (server running): ~120-200ms
