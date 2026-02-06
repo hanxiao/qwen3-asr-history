@@ -1,0 +1,21 @@
+/Users/hanxiao/Documents/qwen3-asr-history/bin/server.py:483: DeprecationWarning: 
+        on_event is deprecated, use lifespan event handlers instead.
+
+        Read more about it in the
+        [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+        
+  @app.on_event("startup")
+Starting MLX Serving on 127.0.0.1:18321
+Loading ASR model mlx-community/Qwen3-ASR-0.6B-bf16...
+Fetching 9 files:   0%|          | 0/9 [00:00<?, ?it/s]Fetching 9 files: 100%|██████████| 9/9 [00:00<00:00, 33346.94it/s]
+ASR model loaded in 1.39s
+Loading TTS model mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16...
+You are using a model of type qwen3_tts to instantiate a model of type . This is not supported for all configurations of models and can yield errors.
+The tokenizer you are loading from '/Volumes/One Touch/ai-models/mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+Loaded speech tokenizer from /Volumes/One Touch/ai-models/mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16/speech_tokenizer
+TTS model loaded in 0.29s
+Supported languages: ['auto', 'chinese', 'english', 'german', 'italian', 'portuguese', 'spanish', 'japanese', 'korean', 'french', 'russian']
+Loading translate model from /Volumes/One Touch/ai-models/mlx-community/translategemma-12b-it-8bit...
+Translate model loaded in 1.85s
+mx.metal.device_info is deprecated and will be removed in a future version. Use mx.device_info instead.
+  [en->zh] 11ch -> 6ch in 0.89s

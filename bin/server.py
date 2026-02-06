@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Persistent Qwen3 Speech server (ASR + TTS).
+MLX Serving - Unified ASR + TTS + Translate server.
 Keeps models loaded in memory for fast inference.
-Saves transcription/synthesis history to ~/Documents/qwen3-asr-history/history/
+Saves transcription/synthesis/translation history to ~/Documents/qwen3-asr-history/history/
 """
 import os
 import sys
@@ -12,10 +12,11 @@ import time
 import json
 import uuid
 import threading
+import re
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from pydantic import BaseModel
 import uvicorn
@@ -41,7 +42,7 @@ server_paused = False
 # TTS globals
 # ============================================================
 tts_model = None
-tts_model_name = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16"
+tts_model_name = "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16"
 tts_model_loading = False
 tts_server_paused = False
 
@@ -76,16 +77,58 @@ TTS_LANGUAGES = {
     "russian": "ru",
 }
 
+# ============================================================
+# Translate globals
+# ============================================================
+translate_model = None
+translate_tokenizer = None
+translate_model_name = "translategemma-12b-it-8bit"
+translate_model_dir = "/Volumes/One Touch/ai-models/mlx-community/translategemma-12b-it-8bit"
+translate_model_loading = False
+translate_server_paused = False
+
+# Serialize all translate inference - MLX Metal can't handle concurrent GPU access
+_translate_inference_lock = threading.Lock()
+_translate_request_count = 0
+_TRANSLATE_CACHE_CLEAR_INTERVAL = 50
+
+# Track background file translations
+translate_file_jobs: dict[str, dict] = {}
+
+SUPPORTED_TRANSLATE_LANGS = {
+    "af": "Afrikaans", "am": "Amharic", "ar": "Arabic", "az": "Azerbaijani",
+    "be": "Belarusian", "bg": "Bulgarian", "bn": "Bengali", "bs": "Bosnian",
+    "ca": "Catalan", "cs": "Czech", "cy": "Welsh", "da": "Danish",
+    "de": "German", "el": "Greek", "en": "English", "es": "Spanish",
+    "et": "Estonian", "fa": "Persian", "fi": "Finnish", "fr": "French",
+    "ga": "Irish", "gl": "Galician", "gu": "Gujarati", "ha": "Hausa",
+    "he": "Hebrew", "hi": "Hindi", "hr": "Croatian", "hu": "Hungarian",
+    "hy": "Armenian", "id": "Indonesian", "ig": "Igbo", "is": "Icelandic",
+    "it": "Italian", "ja": "Japanese", "jv": "Javanese", "ka": "Georgian",
+    "kk": "Kazakh", "km": "Khmer", "kn": "Kannada", "ko": "Korean",
+    "lo": "Lao", "lt": "Lithuanian", "lv": "Latvian", "mg": "Malagasy",
+    "mi": "Maori", "mk": "Macedonian", "ml": "Malayalam", "mn": "Mongolian",
+    "mr": "Marathi", "ms": "Malay", "mt": "Maltese", "my": "Burmese",
+    "ne": "Nepali", "nl": "Dutch", "no": "Norwegian", "ny": "Chichewa",
+    "pa": "Punjabi", "pl": "Polish", "pt": "Portuguese", "ro": "Romanian",
+    "ru": "Russian", "sd": "Sindhi", "si": "Sinhala", "sk": "Slovak",
+    "sl": "Slovenian", "so": "Somali", "sq": "Albanian", "sr": "Serbian",
+    "su": "Sundanese", "sv": "Swedish", "sw": "Swahili", "ta": "Tamil",
+    "te": "Telugu", "tg": "Tajik", "th": "Thai", "tl": "Filipino",
+    "tr": "Turkish", "uk": "Ukrainian", "ur": "Urdu", "uz": "Uzbek",
+    "vi": "Vietnamese", "yo": "Yoruba", "zh": "Chinese", "zu": "Zulu",
+}
+
 HOST = "127.0.0.1"
 PORT = 18321
 PROJECT_DIR = Path(__file__).parent.parent.resolve()
 HISTORY_DIR = PROJECT_DIR / "history"
 TTS_OUTPUT_DIR = PROJECT_DIR / "tts_output"
 
-app = FastAPI(title="Qwen3-Speech Server")
+app = FastAPI(title="MLX Serving")
 
 # Track background file synthesis jobs
-file_synth_jobs: dict[str, dict] = {}  # output_path -> {status, segments, done, errors, elapsed, audio_duration_ms}
+file_synth_jobs: dict[str, dict] = {}
 
 
 # ============================================================
@@ -153,6 +196,115 @@ def save_tts_history(text: str, voice: str, language: str, audio_path: str,
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def save_translate_history(source_text: str, translated_text: str, source_lang: str,
+                           target_lang: str, latency_ms: float):
+    """Save translation to history."""
+    now = datetime.now()
+    date_str = now.strftime("%Y-%m-%d")
+    day_dir = HISTORY_DIR / date_str
+    day_dir.mkdir(parents=True, exist_ok=True)
+
+    record = {
+        "type": "translate",
+        "timestamp": now.isoformat(),
+        "source_text": source_text,
+        "translated_text": translated_text,
+        "source_lang": source_lang,
+        "target_lang": target_lang,
+        "source_lang_name": SUPPORTED_TRANSLATE_LANGS.get(source_lang, source_lang),
+        "target_lang_name": SUPPORTED_TRANSLATE_LANGS.get(target_lang, target_lang),
+        "latency_ms": round(latency_ms, 2),
+        "model": translate_model_name,
+    }
+    jsonl_path = day_dir / "translate_history.jsonl"
+    with open(jsonl_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+# ============================================================
+# Translate helpers
+# ============================================================
+
+def translate_text(text: str, source: str, target: str) -> tuple[str, float]:
+    """Translate a single text. Returns (translation, elapsed_seconds).
+    Thread-safe: uses _translate_inference_lock to serialize Metal GPU access."""
+    with _translate_inference_lock:
+        return _translate_text_impl(text, source, target)
+
+
+def _translate_text_impl(text: str, source: str, target: str) -> tuple[str, float]:
+    global _translate_request_count
+    import mlx.core as mx
+    from mlx_lm import stream_generate
+
+    messages = [
+        {"role": "user", "content": [
+            {"type": "text", "text": text,
+             "source_lang_code": source, "target_lang_code": target}
+        ]}
+    ]
+    prompt = translate_tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True,
+    )
+
+    t0 = time.time()
+    result_parts = []
+    for resp in stream_generate(
+        translate_model, translate_tokenizer, prompt=prompt,
+        max_tokens=1024,
+    ):
+        segment = resp.text
+        if "<end_of_turn>" in segment:
+            result_parts.append(segment.split("<end_of_turn>")[0])
+            break
+        result_parts.append(segment)
+    elapsed = time.time() - t0
+
+    clean = "".join(result_parts).strip()
+
+    # Periodic Metal cache clear to prevent long-running buildup
+    _translate_request_count += 1
+    if _translate_request_count % _TRANSLATE_CACHE_CLEAR_INTERVAL == 0:
+        mx.metal.clear_cache()
+
+    return clean, elapsed
+
+
+def _translate_file_worker(src_path: Path, out_path: Path, source: str, target: str, delimiter: str):
+    """Background worker for file translation."""
+    job = translate_file_jobs[str(out_path)]
+    content = src_path.read_text(encoding="utf-8")
+    segments = content.split("\n") if delimiter == "\n" else content.split(delimiter)
+    job["lines"] = len(segments)
+
+    t0 = time.time()
+    translated = []
+    errors = 0
+    for i, segment in enumerate(segments):
+        stripped = segment.strip()
+        if not stripped:
+            translated.append("")
+            continue
+        try:
+            result, elapsed = translate_text(stripped, source, target)
+            translated.append(result)
+            job["done"] = i + 1
+            print(f"  file [{i+1}/{len(segments)}] {len(stripped)}ch -> {len(result)}ch in {elapsed:.2f}s")
+        except Exception as e:
+            print(f"  file [{i+1}/{len(segments)}] ERROR: {e}")
+            translated.append(stripped)
+            errors += 1
+            job["done"] = i + 1
+
+    total_elapsed = time.time() - t0
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_text = delimiter.join(translated) if delimiter != "\n" else "\n".join(translated)
+    out_path.write_text(out_text, encoding="utf-8")
+
+    job.update({"status": "done", "errors": errors, "elapsed": round(total_elapsed, 2)})
+    print(f"  File done: {len(segments)} lines, {errors} errors, {total_elapsed:.1f}s -> {out_path}")
+
+
 # ============================================================
 # Model loading
 # ============================================================
@@ -173,6 +325,7 @@ class SynthesizeRequest(BaseModel):
     language: str = "en"
     speed: float = 1.0
     format: str = "ogg"  # "ogg" (default) or "wav"
+    instruct: str = None  # Voice description for VoiceDesign models
 
 
 class SwitchModelRequest(BaseModel):
@@ -181,6 +334,36 @@ class SwitchModelRequest(BaseModel):
 
 class SwitchTTSModelRequest(BaseModel):
     model: str
+
+
+# Translate request/response models (Google Translate compatible)
+class TranslateRequest(BaseModel):
+    q: str | list[str]
+    source: str
+    target: str
+    format: str = "text"
+
+
+class Translation(BaseModel):
+    translatedText: str
+    detectedSourceLanguage: str | None = None
+    model: str = "translategemma-12b-it-8bit"
+
+
+class TranslateResponseData(BaseModel):
+    translations: list[Translation]
+
+
+class TranslateResponse(BaseModel):
+    data: TranslateResponseData
+
+
+class FileTranslateRequest(BaseModel):
+    file: str
+    source: str
+    target: str
+    output: str | None = None
+    delimiter: str = "\n"
 
 
 def load_model(model_name: str = None):
@@ -219,10 +402,13 @@ def load_tts_model(model_name: str = None):
     try:
         from mlx_audio.tts.utils import load_model as tts_load
 
-        # Try USB path first for the default model
-        model_path = tts_model_name
-        if tts_model_name == "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16" and os.path.exists(TTS_MODEL_PATH):
-            model_path = TTS_MODEL_PATH
+        # Try USB path first for all models
+        usb_base = "/Volumes/One Touch/ai-models/mlx-community"
+        usb_path = os.path.join(usb_base, tts_model_name.split("/")[-1])
+        if os.path.exists(usb_path):
+            model_path = usb_path
+        else:
+            model_path = tts_model_name
 
         tts_model = tts_load(model_path=model_path)
 
@@ -244,6 +430,27 @@ def load_tts_model(model_name: str = None):
         tts_model_loading = False
 
     return tts_model
+
+
+def load_translate_model():
+    """Load translate model (TranslateGemma)."""
+    global translate_model, translate_tokenizer, translate_model_loading
+
+    translate_model_loading = True
+    print(f"Loading translate model from {translate_model_dir}...")
+    start = time.time()
+
+    try:
+        from mlx_lm import load as mlx_load
+        translate_model, translate_tokenizer = mlx_load(translate_model_dir)
+        elapsed = time.time() - start
+        print(f"Translate model loaded in {elapsed:.2f}s")
+    except Exception as e:
+        print(f"Failed to load translate model: {e}")
+        translate_model = None
+        translate_tokenizer = None
+    finally:
+        translate_model_loading = False
 
 
 def convert_wav_to_ogg(wav_path: str, ogg_path: str) -> bool:
@@ -277,10 +484,11 @@ def convert_to_wav(audio_path: str) -> str:
 async def startup_event():
     load_model()
     load_tts_model()
+    load_translate_model()
 
 
 # ============================================================
-# ASR endpoints
+# Health / Status endpoints
 # ============================================================
 
 @app.get("/health")
@@ -290,7 +498,9 @@ async def health():
         "model": current_model_name,
         "loaded": model is not None,
         "tts_model": tts_model_name,
-        "tts_loaded": tts_model is not None
+        "tts_loaded": tts_model is not None,
+        "translate_model": translate_model_name,
+        "translate_loaded": translate_model is not None,
     }
 
 
@@ -305,6 +515,10 @@ async def get_status():
         "available_models": AVAILABLE_MODELS
     }
 
+
+# ============================================================
+# ASR endpoints
+# ============================================================
 
 @app.post("/api/server/pause")
 async def pause_server():
@@ -478,7 +692,6 @@ async def switch_tts_model(req: SwitchTTSModelRequest):
 async def get_tts_voices():
     """List available voices."""
     voices = list(TTS_VOICES)
-    # Add model-specific speakers if available
     if tts_model and hasattr(tts_model, 'get_supported_speakers'):
         model_speakers = tts_model.get_supported_speakers()
         existing_ids = {v["id"] for v in voices}
@@ -503,7 +716,6 @@ async def get_tts_history():
                                 record = json.loads(line)
                                 record["date"] = d.name
                                 all_records.append(record)
-    # Sort by timestamp descending
     all_records.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
     return JSONResponse(all_records)
 
@@ -547,10 +759,8 @@ async def synthesize(req: SynthesizeRequest):
 
     start = time.time()
 
-    # Create output directory
     TTS_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Generate unique filename
     file_id = uuid.uuid4().hex[:12]
     file_prefix = f"tts_{file_id}"
     output_file = TTS_OUTPUT_DIR / f"{file_prefix}.wav"
@@ -558,13 +768,12 @@ async def synthesize(req: SynthesizeRequest):
     try:
         from mlx_audio.tts.generate import generate_audio
 
-        # Map short language codes to full names for Qwen3-TTS
         lang_map = {"zh": "chinese", "en": "english", "de": "german",
                      "it": "italian", "pt": "portuguese", "es": "spanish",
                      "ja": "japanese", "ko": "korean", "fr": "french", "ru": "russian"}
         lang_code = lang_map.get(req.language, req.language)
 
-        generate_audio(
+        gen_kwargs = dict(
             text=req.text,
             model=tts_model,
             voice=req.voice,
@@ -578,8 +787,11 @@ async def synthesize(req: SynthesizeRequest):
             verbose=False,
             stt_model=None,
         )
+        if req.instruct:
+            gen_kwargs["instruct"] = req.instruct
 
-        # Find the generated file (could be file_prefix.wav or file_prefix_000.wav)
+        generate_audio(**gen_kwargs)
+
         actual_file = None
         for candidate in [
             TTS_OUTPUT_DIR / f"{file_prefix}.wav",
@@ -590,7 +802,6 @@ async def synthesize(req: SynthesizeRequest):
                 break
 
         if actual_file is None:
-            # Check for any file with the prefix
             for f in TTS_OUTPUT_DIR.iterdir():
                 if f.name.startswith(file_prefix) and f.suffix == ".wav":
                     actual_file = f
@@ -599,26 +810,21 @@ async def synthesize(req: SynthesizeRequest):
         if actual_file is None:
             raise HTTPException(status_code=500, detail="Audio generation failed - no output file")
 
-        # Rename to standard name if needed
         if actual_file != output_file:
             actual_file.rename(output_file)
 
-        # Convert to OGG Opus if requested (default)
         final_file = output_file
         if req.format == "ogg":
             ogg_file = output_file.with_suffix(".ogg")
             if convert_wav_to_ogg(str(output_file), str(ogg_file)):
-                # Delete intermediate WAV
                 output_file.unlink(missing_ok=True)
                 final_file = ogg_file
             else:
-                # Conversion failed, fall back to WAV
                 final_file = output_file
 
         latency_ms = (time.time() - start) * 1000
         audio_duration_ms = get_audio_duration(str(final_file))
 
-        # Save to history
         save_tts_history(
             text=req.text,
             voice=req.voice,
@@ -653,11 +859,11 @@ async def synthesize(req: SynthesizeRequest):
 # ============================================================
 
 class SynthesizeFileRequest(BaseModel):
-    file: str                    # input text file path
+    file: str
     language: str = "chinese"
     voice: str = "Chelsie"
-    output: str | None = None    # output file path (default: {input}.ogg)
-    format: str = "ogg"          # "ogg" (default) or "wav"
+    output: str | None = None
+    format: str = "ogg"
 
 
 def _synthesize_file_worker(src_path: Path, out_path: Path, language: str, voice: str, fmt: str):
@@ -671,7 +877,6 @@ def _synthesize_file_worker(src_path: Path, out_path: Path, language: str, voice
         job.update({"status": "error", "error": str(e)})
         return
 
-    # Split by double newlines (paragraphs) first, then by single newlines for long text
     segments = [s.strip() for s in content.split("\n\n") if s.strip()]
     if not segments:
         segments = [s.strip() for s in content.split("\n") if s.strip()]
@@ -681,7 +886,6 @@ def _synthesize_file_worker(src_path: Path, out_path: Path, language: str, voice
 
     job["segments"] = len(segments)
 
-    # Generate audio for each segment into temp WAV files
     from mlx_audio.tts.generate import generate_audio
 
     lang_map = {"zh": "chinese", "en": "english", "de": "german",
@@ -711,7 +915,6 @@ def _synthesize_file_worker(src_path: Path, out_path: Path, language: str, voice
                 stt_model=None,
             )
 
-            # Find generated file
             seg_file = None
             for candidate in [temp_dir / f"{seg_prefix}.wav", temp_dir / f"{seg_prefix}_000.wav"]:
                 if candidate.exists():
@@ -739,7 +942,6 @@ def _synthesize_file_worker(src_path: Path, out_path: Path, language: str, voice
         job.update({"status": "error", "error": "All segments failed"})
         return
 
-    # Concatenate all segment WAVs using ffmpeg
     try:
         concat_list = temp_dir / "concat.txt"
         with open(concat_list, "w") as f:
@@ -747,14 +949,12 @@ def _synthesize_file_worker(src_path: Path, out_path: Path, language: str, voice
                 f.write(f"file '{sf}'\n")
 
         if fmt == "ogg":
-            # Concatenate and convert to OGG Opus in one step
             result = subprocess.run(
                 ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list),
                  "-c:a", "libopus", "-b:a", "48k", str(out_path)],
                 capture_output=True, text=True, timeout=300
             )
         else:
-            # Concatenate to WAV
             result = subprocess.run(
                 ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list),
                  "-c:a", "pcm_s16le", str(out_path)],
@@ -769,7 +969,6 @@ def _synthesize_file_worker(src_path: Path, out_path: Path, language: str, voice
         job.update({"status": "error", "error": str(e)})
         return
     finally:
-        # Cleanup temp files
         import shutil
         shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -852,6 +1051,168 @@ async def restart_tts_server():
 
 
 # ============================================================
+# Translate endpoints
+# ============================================================
+
+@app.get("/api/translate/status")
+async def get_translate_status():
+    """Get translate model status."""
+    return {
+        "model": translate_model_name,
+        "model_dir": translate_model_dir,
+        "loaded": translate_model is not None,
+        "loading": translate_model_loading,
+        "paused": translate_server_paused,
+        "languages_count": len(SUPPORTED_TRANSLATE_LANGS),
+    }
+
+
+@app.post("/api/translate/server/pause")
+async def pause_translate_server():
+    global translate_server_paused
+    translate_server_paused = True
+    return {"status": "paused"}
+
+
+@app.post("/api/translate/server/resume")
+async def resume_translate_server():
+    global translate_server_paused
+    translate_server_paused = False
+    return {"status": "active"}
+
+
+@app.post("/api/translate/server/restart")
+async def restart_translate_server():
+    global translate_model, translate_tokenizer
+    translate_model = None
+    translate_tokenizer = None
+    import gc
+    gc.collect()
+    load_translate_model()
+    return {"status": "restarted", "model": translate_model_name}
+
+
+@app.post("/translate", response_model=TranslateResponse)
+def post_translate(req: TranslateRequest):
+    if translate_server_paused:
+        raise HTTPException(503, "Translate server is paused")
+    if translate_model is None:
+        raise HTTPException(503, "Translate model not loaded")
+
+    texts = [req.q] if isinstance(req.q, str) else req.q
+    if not texts:
+        raise HTTPException(400, "q must not be empty")
+    if req.source not in SUPPORTED_TRANSLATE_LANGS:
+        raise HTTPException(400, f"Unsupported source language: {req.source}")
+    if req.target not in SUPPORTED_TRANSLATE_LANGS:
+        raise HTTPException(400, f"Unsupported target language: {req.target}")
+
+    results = []
+    for text in texts:
+        translation, elapsed = translate_text(text, req.source, req.target)
+        results.append(Translation(
+            translatedText=translation,
+            detectedSourceLanguage=req.source,
+        ))
+        # Save to history
+        save_translate_history(text, translation, req.source, req.target, elapsed * 1000)
+        print(f"  [{req.source}->{req.target}] {len(text)}ch -> {len(translation)}ch in {elapsed:.2f}s")
+    return TranslateResponse(data=TranslateResponseData(translations=results))
+
+
+@app.get("/translate", response_model=TranslateResponse)
+def get_translate(
+    q: list[str] = Query(...),
+    source: str = Query(...),
+    target: str = Query(...),
+):
+    if translate_server_paused:
+        raise HTTPException(503, "Translate server is paused")
+    if translate_model is None:
+        raise HTTPException(503, "Translate model not loaded")
+    if source not in SUPPORTED_TRANSLATE_LANGS:
+        raise HTTPException(400, f"Unsupported source language: {source}")
+    if target not in SUPPORTED_TRANSLATE_LANGS:
+        raise HTTPException(400, f"Unsupported target language: {target}")
+
+    results = []
+    for text in q:
+        translation, elapsed = translate_text(text, source, target)
+        results.append(Translation(
+            translatedText=translation,
+            detectedSourceLanguage=source,
+        ))
+        save_translate_history(text, translation, source, target, elapsed * 1000)
+        print(f"  [{source}->{target}] {len(text)}ch -> {len(translation)}ch in {elapsed:.2f}s")
+    return TranslateResponse(data=TranslateResponseData(translations=results))
+
+
+@app.post("/translate/file")
+def translate_file_endpoint(req: FileTranslateRequest):
+    if translate_model is None:
+        raise HTTPException(503, "Translate model not loaded")
+
+    src_path = Path(req.file).expanduser()
+    if not src_path.exists():
+        raise HTTPException(400, f"File not found: {req.file}")
+    if req.source not in SUPPORTED_TRANSLATE_LANGS:
+        raise HTTPException(400, f"Unsupported source language: {req.source}")
+    if req.target not in SUPPORTED_TRANSLATE_LANGS:
+        raise HTTPException(400, f"Unsupported target language: {req.target}")
+
+    if req.output:
+        out_path = Path(req.output).expanduser()
+    else:
+        out_path = src_path.with_suffix(f".{req.target}")
+
+    out_key = str(out_path)
+    translate_file_jobs[out_key] = {"status": "running", "lines": 0, "done": 0, "errors": 0, "elapsed": 0}
+
+    thread = threading.Thread(
+        target=_translate_file_worker,
+        args=(src_path, out_path, req.source, req.target, req.delimiter),
+        daemon=True,
+    )
+    thread.start()
+
+    return {"status": "started", "output": out_key, "message": "Use GET /translate/file/status?output=<path> to check progress."}
+
+
+@app.get("/translate/file/status")
+def translate_file_status(output: str = Query(...)):
+    if output not in translate_file_jobs:
+        raise HTTPException(404, f"No job found for: {output}")
+    return translate_file_jobs[output]
+
+
+@app.get("/languages")
+async def get_languages():
+    return {"data": {"languages": [
+        {"language": code, "name": name}
+        for code, name in sorted(SUPPORTED_TRANSLATE_LANGS.items())
+    ]}}
+
+
+@app.get("/api/translate/history")
+async def get_translate_history():
+    """Get translation history (all dates)."""
+    all_records = []
+    if HISTORY_DIR.exists():
+        for d in sorted(HISTORY_DIR.iterdir(), reverse=True):
+            if d.is_dir():
+                jsonl_path = d / "translate_history.jsonl"
+                if jsonl_path.exists():
+                    with open(jsonl_path, "r", encoding="utf-8") as f:
+                        for line in f:
+                            if line.strip():
+                                record = json.loads(line)
+                                record["date"] = d.name
+                                all_records.append(record)
+    all_records.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
+    return JSONResponse(all_records)
+
+
+# ============================================================
 # HTML Dashboard
 # ============================================================
 
@@ -861,7 +1222,7 @@ HISTORY_HTML = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>qwen3-speech</title>
+    <title>MLX Serving</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -892,37 +1253,100 @@ HISTORY_HTML = """
         .logo svg { width: 28px; height: 28px; }
         .logo-text { font-weight: 600; font-size: 15px; }
 
-        /* Tab navigation in sidebar */
-        .tab-nav {
-            display: flex;
+        /* Service accordion rows */
+        .service-rows {
             border-bottom: 1px dashed #3a4060;
         }
-        .tab-btn {
-            flex: 1;
-            padding: 10px 0;
-            text-align: center;
-            font-size: 11px;
-            font-family: 'JetBrains Mono', monospace;
-            color: #6b7280;
-            background: transparent;
-            border: none;
+        .service-row {
+            border-bottom: 1px dashed #3a4060;
             cursor: pointer;
-            transition: all 0.15s;
+            transition: background 0.15s;
+        }
+        .service-row:last-child { border-bottom: none; }
+        .service-row:hover { background: rgba(255,255,255,0.03); }
+        .service-row.active {
+            background: rgba(226, 95, 74, 0.12);
+            border-left: 3px solid #e25f4a;
+        }
+        .service-row-header {
+            padding: 10px 16px 8px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .service-row.active .service-row-header { padding-left: 13px; }
+        .service-row-name {
+            font-weight: 600;
+            font-size: 12px;
+            color: #a0a8c0;
             text-transform: uppercase;
             letter-spacing: 0.5px;
+            flex: 1;
         }
-        .tab-btn:hover { color: #a0a8c0; }
-        .tab-btn.active {
+        .service-row.active .service-row-name { color: #fff; }
+        .service-row-arrow {
+            font-size: 10px;
+            color: #4a5070;
+            transition: transform 0.2s;
+        }
+        .service-row.expanded .service-row-arrow { transform: rotate(180deg); }
+        .service-row-model {
+            padding: 0 16px 10px;
+            font-size: 10px;
+            color: #4a5070;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .service-row.active .service-row-model { padding-left: 13px; }
+        .service-row-details {
+            display: none;
+            padding: 0 16px 12px;
+        }
+        .service-row.active .service-row-details { padding-left: 13px; }
+        .service-row.expanded .service-row-details { display: block; }
+        .service-row-details .model-name-full {
+            color: #a0a8c0;
+            font-size: 10px;
+            margin-bottom: 8px;
+            word-break: break-all;
+            line-height: 1.4;
+        }
+        .service-row-details .model-select {
+            width: 100%;
+            margin-bottom: 8px;
+            padding: 5px 6px;
+            background: rgba(255,255,255,0.05);
+            border: 1px dashed #3a4060;
+            color: #a0a8c0;
+            font-size: 10px;
+            font-family: 'JetBrains Mono', monospace;
+            cursor: pointer;
+        }
+        .service-row-details .model-select:focus {
+            outline: none;
+            border-color: #e25f4a;
+        }
+        .service-row-details .model-select option {
+            background: #1a1f36;
             color: #fff;
-            background: rgba(226, 95, 74, 0.2);
-            border-bottom: 2px solid #e25f4a;
         }
+        .service-row-details .model-controls {
+            display: flex;
+            gap: 6px;
+            margin-bottom: 8px;
+        }
+        .service-row-details .svc-stats {
+            font-size: 10px;
+            color: #4a5070;
+        }
+        .service-row-details .svc-stats span { color: #e25f4a; }
 
         .sidebar-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 
-        /* ASR sidebar */
-        .asr-sidebar { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-        .tts-sidebar { flex: 1; display: flex; flex-direction: column; overflow: hidden; display: none; }
+        /* Sidebar sub-content (dates etc) - only one visible at a time */
+        .sidebar-sub { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+        .sidebar-sub.hidden { display: none; }
 
         .dates-container { flex: 1; overflow-y: auto; padding: 10px 0; }
         .date-item {
@@ -1150,46 +1574,15 @@ HISTORY_HTML = """
             border: 1px dashed #d0d5dd;
             background: #fff;
         }
-        .stats {
-            padding: 16px 20px;
-            border-top: 1px dashed #3a4060;
-            font-size: 11px;
-            color: #6b7280;
-        }
-        .stats-row {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 4px;
-        }
-        .stats-value { color: #e25f4a; }
+        /* (old .stats removed - now inline in service row details) */
 
-        /* Section label in sidebar */
-        .section-label {
-            padding: 8px 20px 4px;
-            font-size: 9px;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            color: #4a5070;
-            border-top: 1px dashed #3a4060;
-        }
-
-        /* Model status section */
-        .model-status {
-            padding: 16px 20px;
-            border-top: 1px dashed #3a4060;
-            font-size: 11px;
-        }
-        .status-indicator {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-bottom: 12px;
-        }
+        /* Status dot used in service rows */
         .status-dot {
             width: 8px;
             height: 8px;
             border-radius: 50%;
             background: #4ade80;
+            flex-shrink: 0;
             animation: pulse 2s infinite;
         }
         .status-dot.paused {
@@ -1200,25 +1593,13 @@ HISTORY_HTML = """
             background: #60a5fa;
             animation: pulse 0.5s infinite;
         }
+        .status-dot.error {
+            background: #f87171;
+            animation: none;
+        }
         @keyframes pulse {
             0%, 100% { opacity: 1; }
             50% { opacity: 0.5; }
-        }
-        .status-text {
-            color: #a0a8c0;
-            font-size: 11px;
-        }
-        .model-name {
-            color: #fff;
-            font-size: 11px;
-            margin-bottom: 12px;
-            word-break: break-all;
-            line-height: 1.4;
-        }
-        .model-controls {
-            display: flex;
-            gap: 6px;
-            flex-wrap: wrap;
         }
         .ctrl-btn {
             background: rgba(255,255,255,0.1);
@@ -1240,30 +1621,12 @@ HISTORY_HTML = """
             border-color: #e25f4a;
             color: #fff;
         }
-        .model-select {
-            width: 100%;
-            margin-top: 8px;
-            padding: 6px 8px;
-            background: rgba(255,255,255,0.05);
-            border: 1px dashed #3a4060;
-            color: #a0a8c0;
-            font-size: 10px;
-            font-family: 'JetBrains Mono', monospace;
-            cursor: pointer;
-        }
-        .model-select:focus {
-            outline: none;
-            border-color: #e25f4a;
-        }
-        .model-select option {
-            background: #1a1f36;
-            color: #fff;
-        }
 
         /* TTS panel styles */
         .tts-panel { display: none; }
         .tts-panel.active { display: block; }
         .asr-panel { display: block; }
+        .translate-panel { display: none; }
 
         .tts-compose {
             background: #fff;
@@ -1373,8 +1736,161 @@ HISTORY_HTML = """
             border-radius: 3px;
         }
 
-        /* TTS dates list */
-        .tts-dates-container { flex: 1; overflow-y: auto; padding: 10px 0; }
+        /* TTS dates list (reuses dates-container) */
+
+        /* Translate panel styles */
+        .translate-compose {
+            background: #fff;
+            border: 1px dashed #d0d5dd;
+            padding: 20px;
+            margin-bottom: 24px;
+        }
+        .translate-compose-header {
+            font-size: 13px;
+            font-weight: 500;
+            color: #6b7280;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 16px;
+        }
+        .translate-textarea {
+            width: 100%;
+            min-height: 100px;
+            padding: 12px;
+            border: 1px dashed #d0d5dd;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 14px;
+            line-height: 1.6;
+            resize: vertical;
+            color: #1a1f36;
+            background: #fafafa;
+        }
+        .translate-textarea:focus {
+            outline: none;
+            border-color: #e25f4a;
+        }
+        .translate-textarea[readonly] {
+            background: #f3f4f6;
+            color: #374151;
+        }
+        .translate-controls {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-top: 12px;
+        }
+        .translate-select {
+            padding: 8px 12px;
+            border: 1px dashed #d0d5dd;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            color: #1a1f36;
+            background: #fff;
+            cursor: pointer;
+            max-width: 180px;
+        }
+        .translate-select:focus {
+            outline: none;
+            border-color: #e25f4a;
+        }
+        .swap-btn {
+            background: transparent;
+            border: 1px dashed #d0d5dd;
+            color: #6b7280;
+            padding: 8px 12px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .swap-btn:hover {
+            border-color: #e25f4a;
+            color: #e25f4a;
+        }
+        .translate-output-label {
+            font-size: 11px;
+            color: #9ca3af;
+            margin-top: 16px;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .translate-item {
+            background: #fff;
+            border: 1px dashed #d0d5dd;
+            padding: 16px 20px;
+            margin-bottom: 12px;
+            transition: border-color 0.15s;
+        }
+        .translate-item:hover { border-color: #e25f4a; }
+        .translate-lang-badge {
+            color: #6b7280;
+            font-size: 10px;
+            padding: 2px 6px;
+            background: #f0e6ff;
+            border-radius: 3px;
+        }
+        .translate-arrow {
+            color: #9ca3af;
+            font-size: 11px;
+        }
+        .translate-source-text {
+            font-size: 13px;
+            line-height: 1.5;
+            color: #6b7280;
+            margin-bottom: 8px;
+            padding-bottom: 8px;
+            border-bottom: 1px dashed #e5e7eb;
+        }
+        .translate-result-text {
+            font-size: 15px;
+            line-height: 1.6;
+            color: #1a1f36;
+        }
+
+        /* File translate section */
+        .file-translate-section {
+            background: #fff;
+            border: 1px dashed #d0d5dd;
+            padding: 20px;
+            margin-bottom: 24px;
+        }
+        .file-translate-controls {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-top: 12px;
+        }
+        .file-input {
+            flex: 1;
+            padding: 8px 12px;
+            border: 1px dashed #d0d5dd;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            color: #1a1f36;
+            background: #fafafa;
+        }
+        .file-input:focus {
+            outline: none;
+            border-color: #e25f4a;
+        }
+        .file-progress {
+            margin-top: 12px;
+            font-size: 11px;
+            color: #6b7280;
+        }
+        .file-progress-bar {
+            height: 4px;
+            background: #e5e7eb;
+            border-radius: 2px;
+            margin-top: 6px;
+            overflow: hidden;
+        }
+        .file-progress-fill {
+            height: 100%;
+            background: #e25f4a;
+            border-radius: 2px;
+            transition: width 0.3s;
+        }
     </style>
 </head>
 <body>
@@ -1382,76 +1898,105 @@ HISTORY_HTML = """
         <div class="sidebar">
             <div class="logo">
                 <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <!-- cute microphone with face -->
-                    <rect x="30" y="15" width="40" height="55" rx="20" fill="#e25f4a"/>
-                    <rect x="38" y="75" width="24" height="8" fill="#e25f4a"/>
-                    <rect x="35" y="83" width="30" height="6" rx="2" fill="#e25f4a"/>
-                    <!-- eyes -->
-                    <circle cx="42" cy="38" r="5" fill="#fff"/>
-                    <circle cx="58" cy="38" r="5" fill="#fff"/>
-                    <circle cx="43" cy="39" r="2" fill="#1a1f36"/>
-                    <circle cx="59" cy="39" r="2" fill="#1a1f36"/>
-                    <!-- smile -->
-                    <path d="M42 52 Q50 58 58 52" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round"/>
-                    <!-- sound waves -->
-                    <path d="M18 35 Q12 45 18 55" stroke="#e25f4a" stroke-width="3" fill="none" stroke-linecap="round" opacity="0.6"/>
-                    <path d="M10 30 Q2 45 10 60" stroke="#e25f4a" stroke-width="3" fill="none" stroke-linecap="round" opacity="0.3"/>
-                    <path d="M82 35 Q88 45 82 55" stroke="#e25f4a" stroke-width="3" fill="none" stroke-linecap="round" opacity="0.6"/>
-                    <path d="M90 30 Q98 45 90 60" stroke="#e25f4a" stroke-width="3" fill="none" stroke-linecap="round" opacity="0.3"/>
+                    <!-- MLX chip icon -->
+                    <rect x="20" y="20" width="60" height="60" rx="8" fill="#e25f4a"/>
+                    <!-- chip pins -->
+                    <rect x="32" y="12" width="6" height="12" rx="2" fill="#e25f4a" opacity="0.6"/>
+                    <rect x="47" y="12" width="6" height="12" rx="2" fill="#e25f4a" opacity="0.6"/>
+                    <rect x="62" y="12" width="6" height="12" rx="2" fill="#e25f4a" opacity="0.6"/>
+                    <rect x="32" y="76" width="6" height="12" rx="2" fill="#e25f4a" opacity="0.6"/>
+                    <rect x="47" y="76" width="6" height="12" rx="2" fill="#e25f4a" opacity="0.6"/>
+                    <rect x="62" y="76" width="6" height="12" rx="2" fill="#e25f4a" opacity="0.6"/>
+                    <rect x="8" y="32" width="12" height="6" rx="2" fill="#e25f4a" opacity="0.6"/>
+                    <rect x="8" y="47" width="12" height="6" rx="2" fill="#e25f4a" opacity="0.6"/>
+                    <rect x="8" y="62" width="12" height="6" rx="2" fill="#e25f4a" opacity="0.6"/>
+                    <rect x="80" y="32" width="12" height="6" rx="2" fill="#e25f4a" opacity="0.6"/>
+                    <rect x="80" y="47" width="12" height="6" rx="2" fill="#e25f4a" opacity="0.6"/>
+                    <rect x="80" y="62" width="12" height="6" rx="2" fill="#e25f4a" opacity="0.6"/>
+                    <!-- MLX text -->
+                    <text x="50" y="56" text-anchor="middle" fill="#fff" font-size="18" font-weight="bold" font-family="monospace">MLX</text>
                 </svg>
-                <span class="logo-text">qwen3-speech</span>
+                <span class="logo-text">mlx-serving</span>
             </div>
 
-            <!-- Tab navigation -->
-            <div class="tab-nav">
-                <button class="tab-btn active" id="tab-asr-btn" onclick="switchTab('asr')">ASR</button>
-                <button class="tab-btn" id="tab-tts-btn" onclick="switchTab('tts')">TTS</button>
-            </div>
-
-            <div class="sidebar-content">
-                <!-- ASR sidebar content -->
-                <div class="asr-sidebar" id="asr-sidebar">
-                    <div class="dates-container" id="dates"></div>
-                    <div class="section-label">ASR Model</div>
-                    <div class="model-status" id="model-status">
-                        <div class="status-indicator">
-                            <div class="status-dot" id="status-dot"></div>
-                            <span class="status-text" id="status-text">loading...</span>
-                        </div>
-                        <div class="model-name" id="model-name">-</div>
+            <!-- Service accordion rows -->
+            <div class="service-rows">
+                <!-- ASR row -->
+                <div class="service-row active" id="svc-row-asr" onclick="onServiceRowClick(event, 'asr')">
+                    <div class="service-row-header">
+                        <div class="status-dot" id="status-dot"></div>
+                        <span class="service-row-name">ASR</span>
+                        <span class="service-row-arrow" id="svc-arrow-asr">&#9660;</span>
+                    </div>
+                    <div class="service-row-model" id="svc-model-short-asr">loading...</div>
+                    <div class="service-row-details" onclick="event.stopPropagation()">
+                        <div class="model-name-full" id="model-name">-</div>
+                        <select class="model-select" id="model-select" onchange="switchModel(this.value)"></select>
                         <div class="model-controls">
                             <button class="ctrl-btn" id="btn-pause" onclick="togglePause()">pause</button>
                             <button class="ctrl-btn" id="btn-restart" onclick="restartModel()">restart</button>
                         </div>
-                        <select class="model-select" id="model-select" onchange="switchModel(this.value)">
-                        </select>
-                    </div>
-                    <div class="stats" id="stats">
-                        <div class="stats-row"><span>total</span><span class="stats-value"><span id="stat-total">-</span> / <span id="stat-total-duration">-</span></span></div>
-                        <div class="stats-row"><span>today</span><span class="stats-value"><span id="stat-today">-</span> / <span id="stat-today-duration">-</span></span></div>
+                        <div class="svc-stats">
+                            <div>total: <span id="stat-total">-</span> / <span id="stat-total-duration">-</span></div>
+                            <div>today: <span id="stat-today">-</span> / <span id="stat-today-duration">-</span></div>
+                        </div>
                     </div>
                 </div>
 
-                <!-- TTS sidebar content -->
-                <div class="tts-sidebar" id="tts-sidebar">
-                    <div class="tts-dates-container" id="tts-dates"></div>
-                    <div class="section-label">TTS Model</div>
-                    <div class="model-status" id="tts-model-status">
-                        <div class="status-indicator">
-                            <div class="status-dot" id="tts-status-dot"></div>
-                            <span class="status-text" id="tts-status-text">loading...</span>
-                        </div>
-                        <div class="model-name" id="tts-model-name">-</div>
+                <!-- TTS row -->
+                <div class="service-row" id="svc-row-tts" onclick="onServiceRowClick(event, 'tts')">
+                    <div class="service-row-header">
+                        <div class="status-dot" id="tts-status-dot"></div>
+                        <span class="service-row-name">TTS</span>
+                        <span class="service-row-arrow" id="svc-arrow-tts">&#9660;</span>
+                    </div>
+                    <div class="service-row-model" id="svc-model-short-tts">loading...</div>
+                    <div class="service-row-details" onclick="event.stopPropagation()">
+                        <div class="model-name-full" id="tts-model-name">-</div>
+                        <select class="model-select" id="tts-model-select" onchange="switchTTSModel(this.value)"></select>
                         <div class="model-controls">
                             <button class="ctrl-btn" id="tts-btn-pause" onclick="toggleTTSPause()">pause</button>
                             <button class="ctrl-btn" id="tts-btn-restart" onclick="restartTTSModel()">restart</button>
                         </div>
-                        <select class="model-select" id="tts-model-select" onchange="switchTTSModel(this.value)">
-                        </select>
+                        <div class="svc-stats">
+                            <div>generated: <span id="tts-stat-total">-</span></div>
+                        </div>
                     </div>
-                    <div class="stats" id="tts-stats">
-                        <div class="stats-row"><span>generated</span><span class="stats-value" id="tts-stat-total">-</span></div>
+                </div>
+
+                <!-- Translate row -->
+                <div class="service-row" id="svc-row-translate" onclick="onServiceRowClick(event, 'translate')">
+                    <div class="service-row-header">
+                        <div class="status-dot" id="translate-status-dot"></div>
+                        <span class="service-row-name">Translate</span>
+                        <span class="service-row-arrow" id="svc-arrow-translate">&#9660;</span>
                     </div>
+                    <div class="service-row-model" id="svc-model-short-translate">loading...</div>
+                    <div class="service-row-details" onclick="event.stopPropagation()">
+                        <div class="model-name-full" id="translate-model-name">-</div>
+                        <div class="model-controls">
+                            <button class="ctrl-btn" id="translate-btn-pause" onclick="toggleTranslatePause()">pause</button>
+                            <button class="ctrl-btn" id="translate-btn-restart" onclick="restartTranslateModel()">restart</button>
+                        </div>
+                        <div class="svc-stats">
+                            <div>translations: <span id="translate-stat-total">-</span></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="sidebar-content">
+                <!-- ASR dates -->
+                <div class="sidebar-sub" id="sidebar-sub-asr">
+                    <div class="dates-container" id="dates"></div>
+                </div>
+                <!-- TTS dates -->
+                <div class="sidebar-sub hidden" id="sidebar-sub-tts">
+                    <div class="dates-container" id="tts-dates"></div>
+                </div>
+                <!-- Translate dates -->
+                <div class="sidebar-sub hidden" id="sidebar-sub-translate">
+                    <div class="dates-container" id="translate-dates"></div>
                 </div>
             </div>
         </div>
@@ -1525,6 +2070,48 @@ HISTORY_HTML = """
                 </div>
                 <div id="tts-history"><div class="empty">no TTS history yet</div></div>
             </div>
+
+            <!-- Translate main panel -->
+            <div class="main-content translate-panel" id="translate-panel">
+                <div class="translate-compose">
+                    <div class="translate-compose-header">Translate Text</div>
+                    <div class="translate-controls">
+                        <select class="translate-select" id="translate-source-lang"></select>
+                        <button class="swap-btn" onclick="swapLanguages()" title="Swap languages">&#8644;</button>
+                        <select class="translate-select" id="translate-target-lang"></select>
+                        <button class="synthesize-btn" id="translate-btn" onclick="doTranslate()">
+                            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12.87 15.07l-2.54-2.51.03-.03A17.52 17.52 0 0014.07 6H17V4h-7V2H8v2H1v2h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z"/></svg>
+                            <span id="translate-btn-text">Translate</span>
+                        </button>
+                    </div>
+                    <textarea class="translate-textarea" id="translate-input" placeholder="Enter text to translate..."></textarea>
+                    <div class="translate-output-label">Translation</div>
+                    <textarea class="translate-textarea" id="translate-output" placeholder="Translation will appear here..." readonly></textarea>
+                </div>
+
+                <div class="file-translate-section">
+                    <div class="translate-compose-header">File Translation</div>
+                    <div class="file-translate-controls">
+                        <input type="text" class="file-input" id="translate-file-path" placeholder="File path (e.g. ~/Documents/input.txt)">
+                        <select class="translate-select" id="translate-file-source"></select>
+                        <select class="translate-select" id="translate-file-target"></select>
+                        <button class="synthesize-btn" id="translate-file-btn" onclick="startFileTranslate()">
+                            <span id="translate-file-btn-text">Start</span>
+                        </button>
+                    </div>
+                    <div class="file-progress" id="translate-file-progress" style="display:none;">
+                        <span id="translate-file-progress-text">0 / 0 lines</span>
+                        <div class="file-progress-bar">
+                            <div class="file-progress-fill" id="translate-file-progress-fill" style="width:0%"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="header" style="margin-top: 0;">
+                    <h2>Translation History</h2>
+                </div>
+                <div id="translate-history"><div class="empty">no translation history yet</div></div>
+            </div>
         </div>
     </div>
     <script>
@@ -1545,24 +2132,49 @@ HISTORY_HTML = """
         let ttsHistory = [];
         let ttsPaused = false;
 
+        // ========== Translate state ==========
+        let translatePaused = false;
+        let translateLanguages = [];
+        let translateFilePolling = null;
+
         // ========== Tab switching ==========
         function switchTab(tab) {
             currentTab = tab;
-            document.getElementById('tab-asr-btn').classList.toggle('active', tab === 'asr');
-            document.getElementById('tab-tts-btn').classList.toggle('active', tab === 'tts');
 
-            document.getElementById('asr-sidebar').style.display = tab === 'asr' ? 'flex' : 'none';
-            document.getElementById('tts-sidebar').style.display = tab === 'tts' ? 'flex' : 'none';
+            // Update service row active state
+            ['asr', 'tts', 'translate'].forEach(t => {
+                const row = document.getElementById('svc-row-' + t);
+                row.classList.toggle('active', t === tab);
+            });
 
+            // Update sidebar sub-content
+            ['asr', 'tts', 'translate'].forEach(t => {
+                const sub = document.getElementById('sidebar-sub-' + t);
+                sub.classList.toggle('hidden', t !== tab);
+            });
+
+            // Update main panels
             document.getElementById('asr-panel').style.display = tab === 'asr' ? 'block' : 'none';
-            document.getElementById('asr-panel').classList.toggle('active', tab === 'asr');
             document.getElementById('tts-panel').style.display = tab === 'tts' ? 'block' : 'none';
-            document.getElementById('tts-panel').classList.toggle('active', tab === 'tts');
+            document.getElementById('translate-panel').style.display = tab === 'translate' ? 'block' : 'none';
 
             if (tab === 'tts') {
                 loadTTSHistory();
                 loadTTSStatus();
             }
+            if (tab === 'translate') {
+                loadTranslateLanguages();
+                loadTranslateStatus();
+                loadTranslateHistory();
+            }
+        }
+
+        function onServiceRowClick(event, tab) {
+            const row = document.getElementById('svc-row-' + tab);
+            // Always switch tab
+            switchTab(tab);
+            // Toggle expand/collapse on the clicked row
+            row.classList.toggle('expanded');
         }
 
         // ========== ASR functions ==========
@@ -1638,7 +2250,7 @@ HISTORY_HTML = """
 
         async function loadTranscripts(date) {
             currentDate = date;
-            document.querySelectorAll('.date-item').forEach(el => {
+            document.querySelectorAll('#dates .date-item').forEach(el => {
                 el.classList.toggle('active', el.dataset.date === date);
             });
             const res = await fetch(`/api/transcripts/${date}`);
@@ -1997,8 +2609,8 @@ HISTORY_HTML = """
                 const status = await res.json();
 
                 const dot = document.getElementById('status-dot');
-                const text = document.getElementById('status-text');
                 const modelName = document.getElementById('model-name');
+                const modelShort = document.getElementById('svc-model-short-asr');
                 const pauseBtn = document.getElementById('btn-pause');
                 const select = document.getElementById('model-select');
 
@@ -2006,15 +2618,15 @@ HISTORY_HTML = """
 
                 if (!status.loaded) {
                     dot.className = 'status-dot loading';
-                    text.textContent = 'loading model...';
+                    modelShort.textContent = 'loading model...';
                 } else if (status.paused) {
                     dot.className = 'status-dot paused';
-                    text.textContent = 'paused';
+                    modelShort.textContent = status.model_short;
                     pauseBtn.textContent = 'resume';
                     pauseBtn.classList.add('active');
                 } else {
                     dot.className = 'status-dot';
-                    text.textContent = 'active';
+                    modelShort.textContent = status.model_short;
                     pauseBtn.textContent = 'pause';
                     pauseBtn.classList.remove('active');
                 }
@@ -2031,51 +2643,51 @@ HISTORY_HTML = """
                     });
                 }
             } catch (e) {
-                document.getElementById('status-dot').className = 'status-dot paused';
-                document.getElementById('status-text').textContent = 'offline';
+                document.getElementById('status-dot').className = 'status-dot error';
+                document.getElementById('svc-model-short-asr').textContent = 'offline';
             }
         }
 
         async function togglePause() {
             const dot = document.getElementById('status-dot');
-            const text = document.getElementById('status-text');
+            const modelShort = document.getElementById('svc-model-short-asr');
 
             dot.className = 'status-dot loading';
-            text.textContent = 'updating...';
+            modelShort.textContent = 'updating...';
 
             try {
                 const endpoint = serverPaused ? '/api/server/resume' : '/api/server/pause';
                 await fetch(endpoint, { method: 'POST' });
                 await loadStatus();
             } catch (e) {
-                text.textContent = 'error';
+                modelShort.textContent = 'error';
             }
         }
 
         async function restartModel() {
             const dot = document.getElementById('status-dot');
-            const text = document.getElementById('status-text');
+            const modelShort = document.getElementById('svc-model-short-asr');
             const btn = document.getElementById('btn-restart');
 
             dot.className = 'status-dot loading';
-            text.textContent = 'restarting...';
+            modelShort.textContent = 'restarting...';
             btn.classList.add('active');
 
             try {
                 await fetch('/api/server/restart', { method: 'POST' });
                 await loadStatus();
             } catch (e) {
-                text.textContent = 'error';
+                modelShort.textContent = 'error';
             }
             btn.classList.remove('active');
         }
 
         async function switchModel(modelName) {
             const dot = document.getElementById('status-dot');
-            const text = document.getElementById('status-text');
+            const modelShort = document.getElementById('svc-model-short-asr');
 
             dot.className = 'status-dot loading';
-            text.textContent = 'switching model...';
+            modelShort.textContent = 'switching...';
 
             try {
                 await fetch('/api/model/switch', {
@@ -2085,7 +2697,7 @@ HISTORY_HTML = """
                 });
                 await loadStatus();
             } catch (e) {
-                text.textContent = 'error';
+                modelShort.textContent = 'error';
             }
         }
 
@@ -2097,8 +2709,8 @@ HISTORY_HTML = """
                 const status = await res.json();
 
                 const dot = document.getElementById('tts-status-dot');
-                const text = document.getElementById('tts-status-text');
                 const modelName = document.getElementById('tts-model-name');
+                const modelShort = document.getElementById('svc-model-short-tts');
                 const pauseBtn = document.getElementById('tts-btn-pause');
                 const select = document.getElementById('tts-model-select');
 
@@ -2106,18 +2718,18 @@ HISTORY_HTML = """
 
                 if (status.loading) {
                     dot.className = 'status-dot loading';
-                    text.textContent = 'loading model...';
+                    modelShort.textContent = 'loading model...';
                 } else if (!status.loaded) {
-                    dot.className = 'status-dot paused';
-                    text.textContent = 'not loaded';
+                    dot.className = 'status-dot error';
+                    modelShort.textContent = 'not loaded';
                 } else if (status.paused) {
                     dot.className = 'status-dot paused';
-                    text.textContent = 'paused';
+                    modelShort.textContent = status.model_short;
                     pauseBtn.textContent = 'resume';
                     pauseBtn.classList.add('active');
                 } else {
                     dot.className = 'status-dot';
-                    text.textContent = 'active';
+                    modelShort.textContent = status.model_short;
                     pauseBtn.textContent = 'pause';
                     pauseBtn.classList.remove('active');
                 }
@@ -2134,51 +2746,51 @@ HISTORY_HTML = """
                     });
                 }
             } catch (e) {
-                document.getElementById('tts-status-dot').className = 'status-dot paused';
-                document.getElementById('tts-status-text').textContent = 'offline';
+                document.getElementById('tts-status-dot').className = 'status-dot error';
+                document.getElementById('svc-model-short-tts').textContent = 'offline';
             }
         }
 
         async function toggleTTSPause() {
             const dot = document.getElementById('tts-status-dot');
-            const text = document.getElementById('tts-status-text');
+            const modelShort = document.getElementById('svc-model-short-tts');
 
             dot.className = 'status-dot loading';
-            text.textContent = 'updating...';
+            modelShort.textContent = 'updating...';
 
             try {
                 const endpoint = ttsPaused ? '/api/tts/server/resume' : '/api/tts/server/pause';
                 await fetch(endpoint, { method: 'POST' });
                 await loadTTSStatus();
             } catch (e) {
-                text.textContent = 'error';
+                modelShort.textContent = 'error';
             }
         }
 
         async function restartTTSModel() {
             const dot = document.getElementById('tts-status-dot');
-            const text = document.getElementById('tts-status-text');
+            const modelShort = document.getElementById('svc-model-short-tts');
             const btn = document.getElementById('tts-btn-restart');
 
             dot.className = 'status-dot loading';
-            text.textContent = 'restarting...';
+            modelShort.textContent = 'restarting...';
             btn.classList.add('active');
 
             try {
                 await fetch('/api/tts/server/restart', { method: 'POST' });
                 await loadTTSStatus();
             } catch (e) {
-                text.textContent = 'error';
+                modelShort.textContent = 'error';
             }
             btn.classList.remove('active');
         }
 
         async function switchTTSModel(modelName) {
             const dot = document.getElementById('tts-status-dot');
-            const text = document.getElementById('tts-status-text');
+            const modelShort = document.getElementById('svc-model-short-tts');
 
             dot.className = 'status-dot loading';
-            text.textContent = 'switching model...';
+            modelShort.textContent = 'switching...';
 
             try {
                 await fetch('/api/tts/model/switch', {
@@ -2188,7 +2800,7 @@ HISTORY_HTML = """
                 });
                 await loadTTSStatus();
             } catch (e) {
-                text.textContent = 'error';
+                modelShort.textContent = 'error';
             }
         }
 
@@ -2220,11 +2832,8 @@ HISTORY_HTML = """
                 }
 
                 const result = await res.json();
-
-                // Reload TTS history
                 await loadTTSHistory();
 
-                // Auto-play the new audio
                 setTimeout(() => {
                     const firstItem = document.querySelector('.tts-item');
                     if (firstItem) {
@@ -2257,7 +2866,6 @@ HISTORY_HTML = """
 
                 document.getElementById('tts-stat-total').textContent = records.length + ' items';
 
-                // Build dates sidebar
                 const dates = [...new Set(records.map(r => r.date || r.timestamp.split('T')[0]))];
                 const datesContainer = document.getElementById('tts-dates');
                 datesContainer.innerHTML = dates.map(d =>
@@ -2305,7 +2913,6 @@ HISTORY_HTML = """
                     `;
                 }).join('');
 
-                // Load waveforms for TTS items
                 document.querySelectorAll('.tts-item').forEach(el => loadWaveform(el));
 
             } catch (e) {
@@ -2313,13 +2920,280 @@ HISTORY_HTML = """
             }
         }
 
+        // ========== Translate functions ==========
+
+        async function loadTranslateLanguages() {
+            if (translateLanguages.length > 0) return;
+            try {
+                const res = await fetch('/languages');
+                const data = await res.json();
+                translateLanguages = data.data.languages;
+
+                const selects = ['translate-source-lang', 'translate-target-lang', 'translate-file-source', 'translate-file-target'];
+                selects.forEach(id => {
+                    const sel = document.getElementById(id);
+                    if (sel.options.length > 0) return;
+                    translateLanguages.forEach(lang => {
+                        const opt = document.createElement('option');
+                        opt.value = lang.language;
+                        opt.textContent = lang.name + ' (' + lang.language + ')';
+                        sel.appendChild(opt);
+                    });
+                });
+
+                // Set defaults: en -> zh
+                document.getElementById('translate-source-lang').value = 'en';
+                document.getElementById('translate-target-lang').value = 'zh';
+                document.getElementById('translate-file-source').value = 'en';
+                document.getElementById('translate-file-target').value = 'zh';
+            } catch (e) {
+                console.error('Failed to load languages:', e);
+            }
+        }
+
+        async function loadTranslateStatus() {
+            try {
+                const res = await fetch('/api/translate/status');
+                const status = await res.json();
+
+                const dot = document.getElementById('translate-status-dot');
+                const modelName = document.getElementById('translate-model-name');
+                const modelShort = document.getElementById('svc-model-short-translate');
+                const pauseBtn = document.getElementById('translate-btn-pause');
+
+                translatePaused = status.paused;
+
+                if (status.loading) {
+                    dot.className = 'status-dot loading';
+                    modelShort.textContent = 'loading model...';
+                } else if (!status.loaded) {
+                    dot.className = 'status-dot error';
+                    modelShort.textContent = 'not loaded';
+                } else if (status.paused) {
+                    dot.className = 'status-dot paused';
+                    modelShort.textContent = status.model;
+                    pauseBtn.textContent = 'resume';
+                    pauseBtn.classList.add('active');
+                } else {
+                    dot.className = 'status-dot';
+                    modelShort.textContent = status.model;
+                    pauseBtn.textContent = 'pause';
+                    pauseBtn.classList.remove('active');
+                }
+
+                modelName.textContent = status.model;
+            } catch (e) {
+                document.getElementById('translate-status-dot').className = 'status-dot error';
+                document.getElementById('svc-model-short-translate').textContent = 'offline';
+            }
+        }
+
+        async function toggleTranslatePause() {
+            const dot = document.getElementById('translate-status-dot');
+            const modelShort = document.getElementById('svc-model-short-translate');
+
+            dot.className = 'status-dot loading';
+            modelShort.textContent = 'updating...';
+
+            try {
+                const endpoint = translatePaused ? '/api/translate/server/resume' : '/api/translate/server/pause';
+                await fetch(endpoint, { method: 'POST' });
+                await loadTranslateStatus();
+            } catch (e) {
+                modelShort.textContent = 'error';
+            }
+        }
+
+        async function restartTranslateModel() {
+            const dot = document.getElementById('translate-status-dot');
+            const modelShort = document.getElementById('svc-model-short-translate');
+            const btn = document.getElementById('translate-btn-restart');
+
+            dot.className = 'status-dot loading';
+            modelShort.textContent = 'restarting...';
+            btn.classList.add('active');
+
+            try {
+                await fetch('/api/translate/server/restart', { method: 'POST' });
+                await loadTranslateStatus();
+            } catch (e) {
+                modelShort.textContent = 'error';
+            }
+            btn.classList.remove('active');
+        }
+
+        function swapLanguages() {
+            const src = document.getElementById('translate-source-lang');
+            const tgt = document.getElementById('translate-target-lang');
+            const tmp = src.value;
+            src.value = tgt.value;
+            tgt.value = tmp;
+        }
+
+        async function doTranslate() {
+            const text = document.getElementById('translate-input').value.trim();
+            if (!text) return;
+
+            const source = document.getElementById('translate-source-lang').value;
+            const target = document.getElementById('translate-target-lang').value;
+            const btn = document.getElementById('translate-btn');
+            const btnText = document.getElementById('translate-btn-text');
+            const output = document.getElementById('translate-output');
+
+            btn.disabled = true;
+            btnText.textContent = 'Translating...';
+            output.value = '';
+
+            try {
+                const res = await fetch('/translate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ q: text, source, target })
+                });
+
+                if (!res.ok) {
+                    const err = await res.json();
+                    alert('Error: ' + (err.detail || 'Unknown error'));
+                    return;
+                }
+
+                const result = await res.json();
+                if (result.data && result.data.translations && result.data.translations.length > 0) {
+                    output.value = result.data.translations[0].translatedText;
+                }
+
+                await loadTranslateHistory();
+            } catch (e) {
+                alert('Network error: ' + e.message);
+            } finally {
+                btn.disabled = false;
+                btnText.textContent = 'Translate';
+            }
+        }
+
+        async function startFileTranslate() {
+            const filePath = document.getElementById('translate-file-path').value.trim();
+            if (!filePath) { alert('Enter a file path'); return; }
+
+            const source = document.getElementById('translate-file-source').value;
+            const target = document.getElementById('translate-file-target').value;
+            const btn = document.getElementById('translate-file-btn');
+            const btnText = document.getElementById('translate-file-btn-text');
+
+            btn.disabled = true;
+            btnText.textContent = 'Starting...';
+
+            try {
+                const res = await fetch('/translate/file', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ file: filePath, source, target })
+                });
+
+                if (!res.ok) {
+                    const err = await res.json();
+                    alert('Error: ' + (err.detail || 'Unknown error'));
+                    btn.disabled = false;
+                    btnText.textContent = 'Start';
+                    return;
+                }
+
+                const result = await res.json();
+                const outputPath = result.output;
+
+                document.getElementById('translate-file-progress').style.display = 'block';
+
+                // Poll progress
+                if (translateFilePolling) clearInterval(translateFilePolling);
+                translateFilePolling = setInterval(async () => {
+                    try {
+                        const statusRes = await fetch('/translate/file/status?output=' + encodeURIComponent(outputPath));
+                        const status = await statusRes.json();
+                        const pct = status.lines > 0 ? Math.round((status.done / status.lines) * 100) : 0;
+                        document.getElementById('translate-file-progress-text').textContent =
+                            status.done + ' / ' + status.lines + ' lines' + (status.status === 'done' ? ' - DONE' : '');
+                        document.getElementById('translate-file-progress-fill').style.width = pct + '%';
+
+                        if (status.status === 'done') {
+                            clearInterval(translateFilePolling);
+                            translateFilePolling = null;
+                            btn.disabled = false;
+                            btnText.textContent = 'Start';
+                        }
+                    } catch (e) {}
+                }, 1000);
+
+            } catch (e) {
+                alert('Network error: ' + e.message);
+                btn.disabled = false;
+                btnText.textContent = 'Start';
+            }
+        }
+
+        async function loadTranslateHistory() {
+            try {
+                const res = await fetch('/api/translate/history');
+                const records = await res.json();
+
+                const container = document.getElementById('translate-history');
+
+                if (records.length === 0) {
+                    container.innerHTML = '<div class="empty">no translation history yet</div>';
+                    document.getElementById('translate-stat-total').textContent = '0 items';
+                    return;
+                }
+
+                document.getElementById('translate-stat-total').textContent = records.length + ' items';
+
+                // Build dates sidebar
+                const dates = [...new Set(records.map(r => r.date || r.timestamp.split('T')[0]))];
+                const datesContainer = document.getElementById('translate-dates');
+                datesContainer.innerHTML = dates.map(d =>
+                    `<div class="date-item">${d}</div>`
+                ).join('');
+
+                container.innerHTML = records.slice(0, 100).map((r, i) => {
+                    const time = new Date(r.timestamp).toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+                    const date = r.date || r.timestamp.split('T')[0];
+                    const latency = (r.latency_ms || 0) / 1000;
+                    const srcLang = r.source_lang_name || r.source_lang || '?';
+                    const tgtLang = r.target_lang_name || r.target_lang || '?';
+                    return `
+                        <div class="translate-item">
+                            <div class="transcript-header">
+                                <span class="transcript-time">${date} ${time}</span>
+                                <span class="transcript-latency">
+                                    <svg viewBox="0 0 24 24" fill="currentColor">
+                                        <circle cx="12" cy="13" r="8" fill="none" stroke="currentColor" stroke-width="2"/>
+                                        <path d="M12 9v4l2.5 2.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                                    </svg>
+                                    ${latency.toFixed(2)}s
+                                </span>
+                                <span class="translate-lang-badge">${escapeHtml(srcLang)}</span>
+                                <span class="translate-arrow">&rarr;</span>
+                                <span class="translate-lang-badge">${escapeHtml(tgtLang)}</span>
+                                <span class="transcript-model">${escapeHtml(r.model || '')}</span>
+                            </div>
+                            <div class="translate-source-text">${escapeHtml(r.source_text || '')}</div>
+                            <div class="translate-result-text">${escapeHtml(r.translated_text || '')}</div>
+                        </div>
+                    `;
+                }).join('');
+
+            } catch (e) {
+                console.error('Failed to load translate history:', e);
+            }
+        }
+
         // ========== Init ==========
         loadDates();
         loadStatus();
         loadTTSStatus();
+        loadTranslateStatus();
         setInterval(autoRefresh, 3000);
         setInterval(loadStatus, 5000);
         setInterval(() => { if (currentTab === 'tts') loadTTSStatus(); }, 5000);
+        setInterval(() => { if (currentTab === 'translate') loadTranslateStatus(); }, 5000);
     </script>
 </body>
 </html>
@@ -2336,5 +3210,5 @@ async def history_page():
     )
 
 if __name__ == "__main__":
-    print(f"Starting Qwen3-Speech server on {HOST}:{PORT}")
+    print(f"Starting MLX Serving on {HOST}:{PORT}")
     uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
