@@ -8,7 +8,7 @@
 
 This project empowers **OpenClaw** with high-quality, local, and privacy-first AI capabilities. It replaces cloud APIs and allows the AI agent to:
 
-1. **Hear** using Qwen2.5 ASR
+1. **Hear** using Qwen3 ASR
 2. **Speak** using Qwen2.5 TTS with custom voice instructions
 3. **Translate** using TranslateGemma 12B without leaking data
 
@@ -61,8 +61,8 @@ curl -X POST http://127.0.0.1:18321/translate \
 
 ## Features
 
-* **ASR** runs Qwen2.5 ASR models for fast and accurate speech-to-text.
-* **TTS** uses Qwen2.5 TTS VoiceDesign 1.7B which supports natural speech generation from instructions.
+* **ASR** runs Qwen3 ASR models for fast and accurate speech-to-text.
+* **TTS** uses Qwen2.5 TTS VoiceDesign 1.7B, which supports natural speech generation from instructions.
 * **Translate** is powered by TranslateGemma 12B and handles high-quality document translation across 55 languages.
 * **Dashboard** is a unified web UI running on port 18321 with an accordion sidebar and mini-calendar.
 
@@ -108,7 +108,7 @@ curl -X POST http://127.0.0.1:18321/translate \
 
 All models run locally on Metal GPU via MLX.
 
-* **ASR** uses `mlx-community/Qwen2.5-ASR-0.6B-bf16` by default.
+* **ASR** uses `mlx-community/Qwen3-ASR-0.6B-bf16` by default.
 * **TTS** uses `mlx-community/Qwen2.5-TTS-12Hz-1.7B-VoiceDesign-bf16` by default.
 * **Translate** uses `mlx-community/translategemma-12b-it-8bit`.
 
