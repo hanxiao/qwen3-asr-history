@@ -236,7 +236,7 @@ def save_translate_history(source_text: str, translated_text: str, source_lang: 
 # ============================================================
 
 def save_image_history(prompt: str, image_path: str, latency_ms: float, resolution: str,
-                       seed: int | None = None, steps: int = 4):
+                       seed: int | None = None, steps: int = 9):
     """Save image generation to history."""
     now = datetime.now()
     date_str = now.strftime("%Y-%m-%d")
