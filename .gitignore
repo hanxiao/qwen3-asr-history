@@ -5,3 +5,4 @@ history/
 logs/
 *.plist
 .DS_Store
+tts_output/
