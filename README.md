@@ -71,7 +71,15 @@ curl -X POST http://127.0.0.1:18321/api/image/generate \
 
 ## OpenClaw Integration
 
-Add the ASR wrapper to `openclaw.json` for automatic voice message transcription:
+The best way to use MLS with OpenClaw is via the included skill. Copy `skills/SKILL.md` to your OpenClaw workspace:
+
+```bash
+cp skills/SKILL.md ~/.openclaw/workspace/skills/local-model/SKILL.md
+```
+
+This gives the agent full API reference for all four services.
+
+For automatic voice message transcription, add the ASR wrapper to `openclaw.json`:
 
 ```json
 {
@@ -92,8 +100,6 @@ Add the ASR wrapper to `openclaw.json` for automatic voice message transcription
   }
 }
 ```
-
-TTS, Translate, and Image Generation are available via HTTP API from skills or tool scripts.
 
 ## Requirements
 
