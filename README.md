@@ -1,4 +1,4 @@
-# MLX Serving
+# MLS (MLX Local Serving)
 
 Unified local serving for ASR, TTS, and Translation on Apple Silicon via MLX.
 
@@ -7,14 +7,14 @@ Unified local serving for ASR, TTS, and Translation on Apple Silicon via MLX.
 - **ASR**: Qwen2.5-ASR (0.6B/1.7B) - Fast, accurate speech-to-text
 - **TTS**: Qwen2.5-TTS (1.7B VoiceDesign) - Natural speech with instruct support (e.g., accents)
 - **Translate**: TranslateGemma 12B - High-quality document translation (55+ languages)
-- **Dashboard**: Unified web UI on port 18321 with history, stats, and mini-calendar
+- **Dashboard**: Unified web UI on port 18321 with accordion sidebar, mini-calendar, and 3 service tabs
 
 ## Quick Start
 
 **Install**
 ```bash
-git clone https://github.com/hanxiao/qwen3-asr-history ~/Documents/qwen3-asr-history
-cd ~/Documents/qwen3-asr-history
+git clone https://github.com/hanxiao/mls ~/Documents/mls
+cd ~/Documents/mls
 uv sync
 ```
 
