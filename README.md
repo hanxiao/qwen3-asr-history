@@ -1,73 +1,65 @@
-# Qwen3-ASR History
+# MLX Serving
 
-Local speech-to-text server for OpenClaw using Qwen3-ASR on Apple Silicon via MLX.
+Unified local serving for ASR, TTS, and Translation on Apple Silicon via MLX.
 
-![screenshot](https://github.com/hanxiao/qwen3-asr-history/blob/main/screenshot.png?raw=true)
+## Features
+
+- **ASR**: Qwen2.5-ASR (0.6B/1.7B) - Fast, accurate speech-to-text
+- **TTS**: Qwen2.5-TTS (1.7B VoiceDesign) - Natural speech with instruct support (e.g., accents)
+- **Translate**: TranslateGemma 12B - High-quality document translation (55+ languages)
+- **Dashboard**: Unified web UI on port 18321 with history, stats, and mini-calendar
 
 ## Quick Start
 
-**Install** - clone and run setup, server starts automatically via launchd.
+**Install**
 ```bash
 git clone https://github.com/hanxiao/qwen3-asr-history ~/Documents/qwen3-asr-history
-cd ~/Documents/qwen3-asr-history && ./setup.sh
+cd ~/Documents/qwen3-asr-history
+uv sync
 ```
 
-**CLI** - transcribe audio files (defaults to Chinese, handles mixed Chinese/English).
+**Run Server**
 ```bash
-bin/qwen3-asr recording.ogg
+uv run bin/server.py
+# Server starts on http://127.0.0.1:18321
 ```
 
-**API** - POST audio path for transcription.
+## API
+
+### ASR (Speech-to-Text)
 ```bash
 curl -X POST http://127.0.0.1:18321/transcribe \
   -H "Content-Type: application/json" \
   -d '{"path": "/path/to/audio.ogg"}'
 ```
 
-**UI** - browse history at http://127.0.0.1:18321/history
-
-**Service** - manage the background server.
+### TTS (Text-to-Speech)
 ```bash
-launchctl list | grep qwen3-asr       # status
-launchctl stop ai.openclaw.qwen3-asr  # stop
-launchctl start ai.openclaw.qwen3-asr # start
-tail -f logs/server.log               # logs
+curl -X POST http://127.0.0.1:18321/synthesize \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "你好，世界",
+    "instruct": "A young Chinese male speaker with a Beijing accent"
+  }' > output.json
 ```
 
-## OpenClaw Setup
-
-Add to `~/.openclaw/openclaw.json`:
-
-```json
-{
-  "tools": {
-    "media": {
-      "audio": {
-        "enabled": true,
-        "models": [
-          {
-            "type": "cli",
-            "command": "~/Documents/qwen3-asr-history/bin/qwen3-asr",
-            "args": ["{{MediaPath}}"],
-            "timeoutSeconds": 60
-          }
-        ]
-      }
-    }
-  }
-}
+### Translate
+```bash
+curl -X POST http://127.0.0.1:18321/translate \
+  -H "Content-Type: application/json" \
+  -d '{"q": "Hello world", "source": "en", "target": "zh"}'
 ```
 
 ## Models
 
-Switch via UI dropdown:
-- `mlx-community/Qwen3-ASR-0.6B-bf16` - fastest, default
-- `mlx-community/Qwen3-ASR-1.7B-8bit` - better quality
-- `mlx-community/whisper-large-v3-turbo-asr-fp16` - whisper turbo
-- `mlx-community/whisper-large-v3-asr-8bit` - whisper v3
+All models run locally on Metal GPU via MLX.
+
+- **ASR**: `mlx-community/Qwen2.5-ASR-0.6B-bf16` (Default)
+- **TTS**: `mlx-community/Qwen2.5-TTS-12Hz-1.7B-VoiceDesign-bf16` (Default, supports prompts)
+- **Translate**: `mlx-community/translategemma-12b-it-8bit` (Requires ~12GB VRAM)
 
 ## Requirements
 
-- macOS with Apple Silicon
+- macOS 14+ with Apple Silicon (M1/M2/M3)
 - Python 3.12+
-- ffmpeg
+- `uv` package manager
