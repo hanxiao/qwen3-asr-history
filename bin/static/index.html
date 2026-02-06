@@ -49,6 +49,9 @@
             background: rgba(226, 95, 74, 0.1);
             border-left: 3px dashed #e25f4a;
         }
+        .svc-header-actions { margin-left: auto; display: flex; gap: 4px; }
+        .icon-btn { background: none; border: 1px solid rgba(255,255,255,0.15); color: #6b7280; font-size: 10px; width: 22px; height: 22px; border-radius: 3px; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0; line-height: 1; }
+        .icon-btn:hover { color: #fff; border-color: rgba(255,255,255,0.3); }
         .service-row-header {
             padding: 10px 16px 8px;
             display: flex;
@@ -123,7 +126,7 @@
         }
         .service-row-details .svc-stats span { color: #e25f4a; }
 
-        .sidebar-content { flex: 0 0 auto; }
+        .sidebar-content { margin-top: auto; }
         
         /* Mini Calendar */
         .mini-calendar { padding: 8px 12px 12px; border-top: 1px dashed rgba(255,255,255,0.08); }
@@ -720,16 +723,15 @@
                     <div class="service-row-header">
                         <div class="status-dot" id="status-dot"></div>
                         <span class="service-row-name">ASR</span>
-                        <span class="service-row-arrow" id="svc-arrow-asr">&#9660;</span>
+                        <span class="svc-header-actions" onclick="event.stopPropagation()">
+                            <button class="icon-btn" id="btn-pause" onclick="togglePause()" title="pause">&#9646;&#9646;</button>
+                            <button class="icon-btn" id="btn-restart" onclick="restartModel()" title="restart">&#8635;</button>
+                        </span>
                     </div>
                     <div class="service-row-model" id="svc-model-short-asr">loading...</div>
                     <div class="service-row-details" onclick="event.stopPropagation()">
-                        <div class="model-name-full" id="model-name">-</div>
+                        <div class="model-name-full" id="model-name" style="display:none">-</div>
                         <select class="model-select" id="model-select" onchange="switchModel(this.value)"></select>
-                        <div class="model-controls">
-                            <button class="ctrl-btn" id="btn-pause" onclick="togglePause()">pause</button>
-                            <button class="ctrl-btn" id="btn-restart" onclick="restartModel()">restart</button>
-                        </div>
                         <div class="svc-stats">
                             <div>total: <span id="stat-total">-</span> / <span id="stat-total-duration">-</span></div>
                             <div>today: <span id="stat-today">-</span> / <span id="stat-today-duration">-</span></div>
@@ -742,16 +744,15 @@
                     <div class="service-row-header">
                         <div class="status-dot" id="tts-status-dot"></div>
                         <span class="service-row-name">TTS</span>
-                        <span class="service-row-arrow" id="svc-arrow-tts">&#9660;</span>
+                        <span class="svc-header-actions" onclick="event.stopPropagation()">
+                            <button class="icon-btn" id="tts-btn-pause" onclick="toggleTTSPause()" title="pause">&#9646;&#9646;</button>
+                            <button class="icon-btn" id="tts-btn-restart" onclick="restartTTSModel()" title="restart">&#8635;</button>
+                        </span>
                     </div>
                     <div class="service-row-model" id="svc-model-short-tts">loading...</div>
                     <div class="service-row-details" onclick="event.stopPropagation()">
-                        <div class="model-name-full" id="tts-model-name">-</div>
+                        <div class="model-name-full" id="tts-model-name" style="display:none">-</div>
                         <select class="model-select" id="tts-model-select" onchange="switchTTSModel(this.value)"></select>
-                        <div class="model-controls">
-                            <button class="ctrl-btn" id="tts-btn-pause" onclick="toggleTTSPause()">pause</button>
-                            <button class="ctrl-btn" id="tts-btn-restart" onclick="restartTTSModel()">restart</button>
-                        </div>
                         <div class="svc-stats">
                             <div>generated: <span id="tts-stat-total">-</span></div>
                         </div>
@@ -763,15 +764,14 @@
                     <div class="service-row-header">
                         <div class="status-dot" id="translate-status-dot"></div>
                         <span class="service-row-name">Translate</span>
-                        <span class="service-row-arrow" id="svc-arrow-translate">&#9660;</span>
+                        <span class="svc-header-actions" onclick="event.stopPropagation()">
+                            <button class="icon-btn" id="translate-btn-pause" onclick="toggleTranslatePause()" title="pause">&#9646;&#9646;</button>
+                            <button class="icon-btn" id="translate-btn-restart" onclick="restartTranslateModel()" title="restart">&#8635;</button>
+                        </span>
                     </div>
                     <div class="service-row-model" id="svc-model-short-translate">loading...</div>
                     <div class="service-row-details" onclick="event.stopPropagation()">
-                        <div class="model-name-full" id="translate-model-name">-</div>
-                        <div class="model-controls">
-                            <button class="ctrl-btn" id="translate-btn-pause" onclick="toggleTranslatePause()">pause</button>
-                            <button class="ctrl-btn" id="translate-btn-restart" onclick="restartTranslateModel()">restart</button>
-                        </div>
+                        <div class="model-name-full" id="translate-model-name" style="display:none">-</div>
                         <div class="svc-stats">
                             <div>translations: <span id="translate-stat-total">-</span></div>
                         </div>
