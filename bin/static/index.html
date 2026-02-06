@@ -826,7 +826,7 @@
                         <div class="status-dot" id="image-status-dot"></div>
                         <span class="service-row-name">Image</span>
                     </div>
-                    <div class="service-row-model">z-image-turbo-8bit</div>
+                    <div class="service-row-model" id="svc-model-short-image">z-image-turbo-8bit</div>
                     <div class="service-row-details" onclick="event.stopPropagation()">
                         <div class="svc-stats">
                             <div>Local mflux</div>
@@ -1945,9 +1945,36 @@
             }).join('');
         }
 
-        // Init
+        // Init - load all service statuses on page load
+        async function initServiceStatuses() {
+            try {
+                // ASR status
+                const asrRes = await fetch('/health');
+                const health = await asrRes.json();
+                if (health.loaded) {
+                    document.getElementById('svc-model-short-asr').textContent = health.model.split('/').pop();
+                    document.getElementById('status-dot').className = 'status-dot';
+                }
+                // TTS status
+                if (health.tts_loaded) {
+                    document.getElementById('svc-model-short-tts').textContent = health.tts_model.split('/').pop();
+                    document.getElementById('tts-status-dot').className = 'status-dot';
+                }
+                // Translate status
+                if (health.translate_loaded) {
+                    document.getElementById('svc-model-short-translate').textContent = 'TranslateGemma';
+                    document.getElementById('translate-status-dot').className = 'status-dot';
+                }
+                // Image status
+                if (health.image_loaded) {
+                    document.getElementById('svc-model-short-image').textContent = health.image_model;
+                    document.getElementById('image-status-dot').className = 'status-dot';
+                }
+            } catch(e) { console.log('status fetch error', e); }
+        }
         loadDates();
         initCalendar();
+        initServiceStatuses();
     </script>
 </body>
 </html>
