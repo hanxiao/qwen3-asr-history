@@ -1496,12 +1496,12 @@
                 } else if (status.paused) {
                     dot.className = 'status-dot paused';
                     modelShort.textContent = status.model_short;
-                    pauseBtn.textContent = 'resume';
+                    pauseBtn.innerHTML = '<svg width="10" height="10" viewBox="0 0 10 10"><polygon points="2,1 9,5 2,9" fill="currentColor"/></svg>'; pauseBtn.title = 'resume';
                     pauseBtn.classList.add('active');
                 } else {
                     dot.className = 'status-dot';
                     modelShort.textContent = status.model_short;
-                    pauseBtn.textContent = 'pause';
+                    pauseBtn.innerHTML = '<svg width="10" height="10" viewBox="0 0 10 10"><rect x="1" y="1" width="3" height="8" fill="currentColor"/><rect x="6" y="1" width="3" height="8" fill="currentColor"/></svg>'; pauseBtn.title = 'pause';
                     pauseBtn.classList.remove('active');
                 }
 
@@ -1599,12 +1599,12 @@
                 } else if (status.paused) {
                     dot.className = 'status-dot paused';
                     modelShort.textContent = status.model_short;
-                    pauseBtn.textContent = 'resume';
+                    pauseBtn.innerHTML = '<svg width="10" height="10" viewBox="0 0 10 10"><polygon points="2,1 9,5 2,9" fill="currentColor"/></svg>'; pauseBtn.title = 'resume';
                     pauseBtn.classList.add('active');
                 } else {
                     dot.className = 'status-dot';
                     modelShort.textContent = status.model_short;
-                    pauseBtn.textContent = 'pause';
+                    pauseBtn.innerHTML = '<svg width="10" height="10" viewBox="0 0 10 10"><rect x="1" y="1" width="3" height="8" fill="currentColor"/><rect x="6" y="1" width="3" height="8" fill="currentColor"/></svg>'; pauseBtn.title = 'pause';
                     pauseBtn.classList.remove('active');
                 }
 
@@ -1846,12 +1846,12 @@
                 } else if (status.paused) {
                     dot.className = 'status-dot paused';
                     modelShort.textContent = status.model;
-                    pauseBtn.textContent = 'resume';
+                    pauseBtn.innerHTML = '<svg width="10" height="10" viewBox="0 0 10 10"><polygon points="2,1 9,5 2,9" fill="currentColor"/></svg>'; pauseBtn.title = 'resume';
                     pauseBtn.classList.add('active');
                 } else {
                     dot.className = 'status-dot';
                     modelShort.textContent = status.model;
-                    pauseBtn.textContent = 'pause';
+                    pauseBtn.innerHTML = '<svg width="10" height="10" viewBox="0 0 10 10"><rect x="1" y="1" width="3" height="8" fill="currentColor"/><rect x="6" y="1" width="3" height="8" fill="currentColor"/></svg>'; pauseBtn.title = 'pause';
                     pauseBtn.classList.remove('active');
                 }
 
