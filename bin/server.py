@@ -41,7 +41,7 @@ AVAILABLE_MODELS = [
     "mlx-community/whisper-large-v3-asr-8bit",
 ]
 
-current_model_name = "mlx-community/Qwen3-ASR-0.6B-bf16"
+current_model_name = "mlx-community/Qwen3-ASR-1.7B-8bit"
 server_paused = False
 
 # ============================================================

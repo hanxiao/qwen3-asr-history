@@ -43,7 +43,7 @@ ffmpeg -y -i "$AUDIO_FILE" -ar 16000 -ac 1 "$WAV_FILE" 2>/dev/null
 # Run Qwen3-ASR directly using project venv
 cd "$PROJECT_DIR"
 .venv/bin/python -m mlx_audio.stt.generate \
-    --model mlx-community/Qwen3-ASR-0.6B-bf16 \
+    --model mlx-community/Qwen3-ASR-1.7B-8bit \
     --audio "$WAV_FILE" \
     --output-path "$OUTPUT_FILE" \
     --format txt \
