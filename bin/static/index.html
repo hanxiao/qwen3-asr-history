@@ -2028,6 +2028,23 @@
         loadDates();
         initCalendar();
         initServiceStatuses();
+
+        // Auto-refresh: poll for new transcripts/history every 10s
+        setInterval(() => {
+            const activeTab = document.querySelector('.service-row.active')?.id?.replace('svc-row-', '');
+            if (activeTab === 'asr') {
+                loadDates();
+            } else if (activeTab === 'tts') {
+                loadTTSHistory();
+                updateTTSStats();
+            } else if (activeTab === 'translate') {
+                loadTranslateHistory();
+                updateTranslateStats();
+            } else if (activeTab === 'image') {
+                loadImageHistory();
+                updateImageStats();
+            }
+        }, 10000);
     </script>
 </body>
 </html>
