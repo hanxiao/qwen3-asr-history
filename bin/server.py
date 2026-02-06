@@ -409,7 +409,7 @@ class ImageGenRequest(BaseModel):
     resolution: str = "1024x1024"  # WxH format or shorthand like 1024x1024
     negative_prompt: str | None = None
     seed: int | None = None
-    steps: int = 4
+    steps: int = 9
 
 
 def load_model(model_name: str = None):
