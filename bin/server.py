@@ -16,6 +16,9 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+# mflux site-packages path (installed in separate uv tool venv, added to sys.path at load time)
+MFLUX_SITE_PACKAGES = os.path.expanduser("~/.local/share/uv/tools/mflux/lib/python3.12/site-packages")
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, Response
 from pydantic import BaseModel
@@ -138,8 +141,9 @@ file_synth_jobs: dict[str, dict] = {}
 # Image Generation globals
 # ============================================================
 IMAGE_OUTPUT_DIR = PROJECT_DIR / "image_output"
-MFLUX_CLI = "/Users/hanxiao/.local/bin/mflux-generate-z-image-turbo"
 MFLUX_MODEL_PATH = "/Volumes/One Touch/ai-models/mflux/z-image-turbo-8bit/"
+image_model = None
+image_model_loading = False
 
 # ============================================================
 # ASR helpers
@@ -499,6 +503,42 @@ def load_translate_model():
         translate_model_loading = False
 
 
+def load_image_model():
+    """Load Z-Image-Turbo model for persistent in-memory image generation."""
+    global image_model, image_model_loading
+
+    if not os.path.isdir(MFLUX_MODEL_PATH):
+        print(f"Image model not available (USB not mounted?): {MFLUX_MODEL_PATH}")
+        return
+
+    if not os.path.isdir(MFLUX_SITE_PACKAGES):
+        print(f"mflux site-packages not found: {MFLUX_SITE_PACKAGES}")
+        return
+
+    # Append mflux site-packages (not insert - avoid overriding venv's numpy)
+    if MFLUX_SITE_PACKAGES not in sys.path:
+        sys.path.append(MFLUX_SITE_PACKAGES)
+
+    image_model_loading = True
+    print(f"Loading image model from {MFLUX_MODEL_PATH}...")
+    start = time.time()
+
+    try:
+        from mflux.models.z_image.variants.turbo.z_image_turbo import ZImageTurbo
+
+        image_model = ZImageTurbo(
+            quantize=8,
+            model_path=MFLUX_MODEL_PATH,
+        )
+        elapsed = time.time() - start
+        print(f"Image model loaded in {elapsed:.2f}s")
+    except Exception as e:
+        print(f"Failed to load image model: {e}")
+        image_model = None
+    finally:
+        image_model_loading = False
+
+
 def convert_wav_to_ogg(wav_path: str, ogg_path: str) -> bool:
     """Convert WAV to OGG Opus using ffmpeg. Returns True on success."""
     try:
@@ -531,6 +571,7 @@ async def startup_event():
     load_model()
     load_tts_model()
     load_translate_model()
+    load_image_model()
 
 
 # ============================================================
@@ -547,6 +588,8 @@ async def health():
         "tts_loaded": tts_model is not None,
         "translate_model": translate_model_name,
         "translate_loaded": translate_model is not None,
+        "image_model": "z-image-turbo-8bit",
+        "image_loaded": image_model is not None,
     }
 
 
@@ -1263,24 +1306,19 @@ async def get_translate_history():
 
 @app.get("/api/image/status")
 async def get_image_status():
-    cli_available = shutil.which(MFLUX_CLI) is not None or os.path.isfile(MFLUX_CLI)
-    model_available = os.path.isdir(MFLUX_MODEL_PATH)
     return {
         "model": "z-image-turbo-8bit",
-        "cli_path": MFLUX_CLI,
         "model_path": MFLUX_MODEL_PATH,
-        "cli_available": cli_available,
-        "model_available": model_available,
-        "available": cli_available and model_available,
+        "loaded": image_model is not None,
+        "loading": image_model_loading,
+        "model_on_disk": os.path.isdir(MFLUX_MODEL_PATH),
+        "available": image_model is not None,
     }
 
 @app.post("/api/image/generate")
 async def generate_image(req: ImageGenRequest):
-    cli_available = shutil.which(MFLUX_CLI) is not None or os.path.isfile(MFLUX_CLI)
-    if not cli_available:
-        raise HTTPException(503, "mflux-generate-z-image-turbo CLI not found")
-    if not os.path.isdir(MFLUX_MODEL_PATH):
-        raise HTTPException(503, f"Model not found at {MFLUX_MODEL_PATH}")
+    if image_model is None:
+        raise HTTPException(503, "Image model not loaded (USB not mounted or load failed)")
 
     start = time.time()
     IMAGE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -1292,7 +1330,6 @@ async def generate_image(req: ImageGenRequest):
             parts = resolution.lower().split("x")
             width, height = int(parts[0]), int(parts[1])
         else:
-            # Default to square
             width = height = 1024
     except (ValueError, IndexError):
         width = height = 1024
@@ -1300,30 +1337,18 @@ async def generate_image(req: ImageGenRequest):
     file_id = uuid.uuid4().hex[:12]
     output_file = IMAGE_OUTPUT_DIR / f"img_{file_id}.png"
 
-    cmd = [
-        MFLUX_CLI,
-        "--prompt", req.prompt,
-        "--model", MFLUX_MODEL_PATH,
-        "--quantize", "8",
-        "--steps", str(req.steps),
-        "--width", str(width),
-        "--height", str(height),
-        "--output", str(output_file),
-    ]
-
-    if req.seed is not None:
-        cmd.extend(["--seed", str(req.seed)])
-
-    if req.negative_prompt:
-        cmd.extend(["--negative-prompt", req.negative_prompt])
-
     try:
         print(f"Image gen: {width}x{height}, steps={req.steps}, seed={req.seed}")
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
 
-        if result.returncode != 0:
-            print(f"mflux stderr: {result.stderr}")
-            raise HTTPException(500, f"Image generation failed: {result.stderr[:500]}")
+        image = image_model.generate_image(
+            seed=req.seed if req.seed is not None else int(time.time()) % (2**31),
+            prompt=req.prompt,
+            width=width,
+            height=height,
+            num_inference_steps=req.steps,
+        )
+
+        image.save(path=str(output_file))
 
         if not output_file.exists():
             raise HTTPException(500, "Image generation produced no output file")
@@ -1331,6 +1356,8 @@ async def generate_image(req: ImageGenRequest):
         latency_ms = (time.time() - start) * 1000
         save_image_history(req.prompt, str(output_file), latency_ms,
                            f"{width}x{height}", seed=req.seed, steps=req.steps)
+
+        print(f"Image gen done: {latency_ms:.0f}ms -> {output_file.name}")
 
         return {
             "status": "ok",
@@ -1342,8 +1369,6 @@ async def generate_image(req: ImageGenRequest):
             "steps": req.steps,
         }
 
-    except subprocess.TimeoutExpired:
-        raise HTTPException(504, "Image generation timed out (120s)")
     except HTTPException:
         raise
     except Exception as e:
