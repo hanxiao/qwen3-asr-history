@@ -126,24 +126,21 @@
         /* Log chart */
         .log-chart-wrap { padding: 6px 10px; border-top: 1px solid var(--sb-border); cursor: pointer; }
         .log-chart-wrap:hover { background: var(--sb-hover); }
+        .log-chart-wrap.active { background: var(--sb-hover); border-left: 2px solid var(--accent); padding-left: 8px; }
         .log-chart-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
         .log-chart-title { font-size: 9px; font-weight: 500; color: var(--sb-text-3); text-transform: uppercase; letter-spacing: 0.3px; }
         .log-chart-count { font-size: 8px; color: var(--sb-text-3); }
         .log-chart { display: flex; align-items: flex-end; gap: 1px; height: 18px; }
         .log-chart-bar { flex: 1; min-width: 1px; background: var(--accent); opacity: 0.5; border-radius: 1px 1px 0 0; transition: height 0.3s ease; }
         .log-chart-bar.has-data { opacity: 0.8; }
-        /* Log viewer modal */
-        .log-modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1000; }
-        .log-modal-overlay.visible { display: flex; align-items: center; justify-content: center; }
-        .log-modal { width: 80vw; max-width: 900px; height: 70vh; background: var(--main-bg); border: 1px solid var(--sb-border); border-radius: 6px; display: flex; flex-direction: column; }
-        .log-modal-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--sb-border); }
-        .log-modal-header h3 { margin: 0; font-size: 13px; font-weight: 600; color: var(--text-1); }
-        .log-modal-close { background: none; border: none; color: var(--text-3); cursor: pointer; font-size: 16px; padding: 2px 6px; border-radius: 3px; }
-        .log-modal-close:hover { background: var(--accent-bg); color: var(--accent); }
-        .log-modal-body { flex: 1; overflow-y: auto; padding: 8px 14px; font-size: 11px; line-height: 1.5; color: var(--text-2); white-space: pre-wrap; word-break: break-all; font-family: 'JetBrains Mono', monospace; }
-        .log-line-info { color: var(--accent); }
-        .log-line-error { color: #ef4444; }
+        /* Log panel */
+        .log-panel { flex-direction: column; overflow: hidden !important; padding: 0 !important; }
+        .log-panel .header { flex-shrink: 0; padding: 16px 24px; }
+        .log-body { flex: 1; overflow-y: auto; padding: 0 24px 16px; font-size: 11px; line-height: 1.6; color: var(--text-2); white-space: pre-wrap; word-break: break-all; }
+        .log-line-info { color: var(--text-2); }
+        .log-line-error { color: #ef4444; font-weight: 500; }
         .log-line-warning { color: #eab308; }
+        .log-status { font-size: 10px; color: var(--text-3); padding: 2px 8px; }
 
         /* Theme toggle */
         .theme-toggle { padding: 6px 10px 8px; border-top: 1px solid var(--sb-border); display: flex; align-items: center; gap: 4px; }
@@ -220,7 +217,7 @@
         /* Panels */
         .tts-panel { display: none; } .tts-panel.active { display: block; }
         .asr-panel { display: block; } .translate-panel { display: none; }
-        .image-panel { display: none; } .vision-panel { display: none; }
+        .image-panel { display: none; } .vision-panel { display: none; } .log-panel { display: none; }
 
         /* Compose panel (right column) */
         .compose-panel { width: 350px; background: var(--surface); border-left: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; overflow: hidden; transition: background 0.2s; }
@@ -407,6 +404,7 @@
                         </div>
                     </div>
                 </div>
+
             </div>
 
             <div class="sidebar-content">
@@ -443,7 +441,7 @@
                     </div>
                 </div>
 
-                <div class="log-chart-wrap" onclick="openLogViewer()" title="Server logs - last 1h">
+                <div class="log-chart-wrap" onclick="switchTab('log')" title="Server logs - last 1h">
                     <div class="log-chart-header">
                         <span class="log-chart-title">log</span>
                         <span class="log-chart-count" id="log-chart-count">--</span>
@@ -456,16 +454,6 @@
                     <button class="theme-btn" onclick="setTheme('dark')" id="theme-dark">dark</button>
                     <button class="theme-btn" onclick="setTheme('auto')" id="theme-auto">auto</button>
                 </div>
-            </div>
-        </div>
-
-        <div class="log-modal-overlay" id="log-modal" onclick="if(event.target===this)closeLogViewer()">
-            <div class="log-modal">
-                <div class="log-modal-header">
-                    <h3>Server Log</h3>
-                    <button class="log-modal-close" onclick="closeLogViewer()">x</button>
-                </div>
-                <div class="log-modal-body" id="log-modal-body"></div>
             </div>
         </div>
 
@@ -562,6 +550,15 @@
                     </div>
                 </div>
                 <div id="vision-history"><div class="empty">no vision history yet</div></div>
+            </div>
+
+            <!-- Log panel -->
+            <div class="main-content log-panel" id="log-panel">
+                <div class="header">
+                    <h2>Server Log</h2>
+                    <span class="log-status" id="log-stream-status">~/.openclaw/workspace/logs/mls.log</span>
+                </div>
+                <div class="log-body" id="log-body"></div>
             </div>
         </div>
 
@@ -897,8 +894,10 @@
             // Update service row active state
             ['asr', 'tts', 'translate', 'image', 'vision'].forEach(t => {
                 const row = document.getElementById('svc-row-' + t);
-                row.classList.toggle('active', t === tab);
+                if (row) row.classList.toggle('active', t === tab);
             });
+            // Highlight log chart when log tab is active
+            document.querySelector('.log-chart-wrap').classList.toggle('active', tab === 'log');
 
             // Update main panels
             document.getElementById('asr-panel').style.display = tab === 'asr' ? 'block' : 'none';
@@ -906,9 +905,17 @@
             document.getElementById('translate-panel').style.display = tab === 'translate' ? 'block' : 'none';
             document.getElementById('image-panel').style.display = tab === 'image' ? 'block' : 'none';
             document.getElementById('vision-panel').style.display = tab === 'vision' ? 'block' : 'none';
+            document.getElementById('log-panel').style.display = tab === 'log' ? 'flex' : 'none';
+
+            // Log streaming: connect when active, disconnect when leaving
+            if (tab === 'log') {
+                connectLogStream();
+            } else {
+                disconnectLogStream();
+            }
 
             // Update compose panel
-            const hasCompose = tab !== 'asr';
+            const hasCompose = ['tts', 'translate', 'image', 'vision'].includes(tab);
             const panel = document.getElementById('compose-panel');
             const handle = document.getElementById('resize-handle');
             const openBtn = document.getElementById('compose-open-strip');
@@ -934,7 +941,7 @@
             }
 
             // Refresh calendar for this service
-            loadCalendarDates(tab);
+            if (tab !== 'log') loadCalendarDates(tab);
 
             if (tab === 'tts') {
                 loadTTSHistory();
@@ -2162,7 +2169,7 @@
             });
         })();
 
-        // Log histogram chart
+        // Log histogram chart + streaming
         let _logEventSource = null;
         async function refreshLogChart() {
             try {
@@ -2171,7 +2178,6 @@
                 const hist = data.histogram; // [0]=now, [59]=59min ago
                 const max = Math.max(...hist, 1);
                 const chart = document.getElementById('log-chart');
-                // Render reversed: left=oldest, right=newest
                 chart.innerHTML = hist.slice().reverse().map((v, i) => {
                     const h = v > 0 ? Math.max(2, Math.round(v / max * 18)) : 0;
                     return '<div class="log-chart-bar' + (v > 0 ? ' has-data' : '') + '" style="height:' + h + 'px"></div>';
@@ -2180,12 +2186,10 @@
             } catch(e) {}
         }
 
-        function openLogViewer() {
-            const modal = document.getElementById('log-modal');
-            const body = document.getElementById('log-modal-body');
-            modal.classList.add('visible');
+        function connectLogStream() {
+            if (_logEventSource) return; // already connected
+            const body = document.getElementById('log-body');
             body.innerHTML = '';
-            // Connect SSE
             _logEventSource = new EventSource('/api/logs/stream');
             _logEventSource.onmessage = function(e) {
                 const line = JSON.parse(e.data);
@@ -2195,13 +2199,14 @@
                 else if (line.includes('[WARNING]') || line.includes('[WARN]')) div.className = 'log-line-warning';
                 else if (line.includes('[INFO]')) div.className = 'log-line-info';
                 body.appendChild(div);
-                // Auto-scroll to bottom
+                // Cap at 2000 lines to avoid memory bloat
+                while (body.childNodes.length > 2000) body.removeChild(body.firstChild);
                 body.scrollTop = body.scrollHeight;
             };
+            _logEventSource.onerror = function() {};
         }
 
-        function closeLogViewer() {
-            document.getElementById('log-modal').classList.remove('visible');
+        function disconnectLogStream() {
             if (_logEventSource) {
                 _logEventSource.close();
                 _logEventSource = null;

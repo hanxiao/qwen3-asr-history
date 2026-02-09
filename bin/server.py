@@ -466,9 +466,9 @@ def _translate_file_worker(src_path: Path, out_path: Path, source: str, target: 
             result, elapsed = translate_text(stripped, source, target)
             translated.append(result)
             job["done"] = i + 1
-            print(f"  file [{i+1}/{len(segments)}] {len(stripped)}ch -> {len(result)}ch in {elapsed:.2f}s")
+            logger.info(f"Translate file [{i+1}/{len(segments)}] {len(stripped)}ch -> {len(result)}ch in {elapsed:.2f}s")
         except Exception as e:
-            print(f"  file [{i+1}/{len(segments)}] ERROR: {e}")
+            logger.error(f"Translate file [{i+1}/{len(segments)}] ERROR: {e}")
             translated.append(stripped)
             errors += 1
             job["done"] = i + 1
@@ -479,7 +479,7 @@ def _translate_file_worker(src_path: Path, out_path: Path, source: str, target: 
     out_path.write_text(out_text, encoding="utf-8")
 
     job.update({"status": "done", "errors": errors, "elapsed": round(total_elapsed, 2)})
-    print(f"  File done: {len(segments)} lines, {errors} errors, {total_elapsed:.1f}s -> {out_path}")
+    logger.info(f"Translate file done: {len(segments)} lines, {errors} errors, {total_elapsed:.1f}s -> {out_path}")
 
 
 # ============================================================
@@ -564,7 +564,7 @@ def load_model(model_name: str = None):
     if model_name:
         current_model_name = model_name
 
-    print(f"Loading ASR model {current_model_name}...")
+    logger.info(f"Loading ASR model {current_model_name}...")
     start = time.time()
 
     load_fn = stt_load_model
@@ -572,7 +572,7 @@ def load_model(model_name: str = None):
     model = stt_load_model(current_model_name)
 
     elapsed = time.time() - start
-    print(f"ASR model loaded in {elapsed:.2f}s")
+    logger.info(f"ASR model loaded in {elapsed:.2f}s")
     return model
 
 
@@ -584,7 +584,7 @@ def load_tts_model(model_name: str = None):
         tts_model_name = model_name
 
     tts_model_loading = True
-    print(f"Loading TTS model {tts_model_name}...")
+    logger.info(f"Loading TTS model {tts_model_name}...")
     start = time.time()
 
     try:
@@ -599,18 +599,17 @@ def load_tts_model(model_name: str = None):
         tts_model = tts_load_fn(model_path=model_path)
 
         elapsed = time.time() - start
-        print(f"TTS model loaded in {elapsed:.2f}s")
+        logger.info(f"TTS model loaded in {elapsed:.2f}s")
 
-        # Print supported speakers
         if hasattr(tts_model, 'get_supported_speakers'):
             speakers = tts_model.get_supported_speakers()
             if speakers:
-                print(f"Supported speakers: {speakers}")
+                logger.info(f"Supported speakers: {speakers}")
         if hasattr(tts_model, 'get_supported_languages'):
             langs = tts_model.get_supported_languages()
-            print(f"Supported languages: {langs}")
+            logger.info(f"Supported languages: {langs}")
     except Exception as e:
-        print(f"Failed to load TTS model: {e}")
+        logger.error(f"Failed to load TTS model: {e}")
         tts_model = None
     finally:
         tts_model_loading = False
@@ -623,15 +622,15 @@ def load_translate_model():
     global translate_model, translate_tokenizer, translate_model_loading
 
     translate_model_loading = True
-    print(f"Loading translate model from {translate_model_dir}...")
+    logger.info(f"Loading translate model from {translate_model_dir}...")
     start = time.time()
 
     try:
         translate_model, translate_tokenizer = mlx_load(translate_model_dir)
         elapsed = time.time() - start
-        print(f"Translate model loaded in {elapsed:.2f}s")
+        logger.info(f"Translate model loaded in {elapsed:.2f}s")
     except Exception as e:
-        print(f"Failed to load translate model: {e}")
+        logger.error(f"Failed to load translate model: {e}")
         translate_model = None
         translate_tokenizer = None
     finally:
@@ -643,11 +642,11 @@ def load_image_model():
     global image_model, image_model_loading
 
     if not os.path.isdir(MFLUX_MODEL_PATH):
-        print(f"Image model not available (USB not mounted?): {MFLUX_MODEL_PATH}")
+        logger.warning(f"Image model not available (USB not mounted?): {MFLUX_MODEL_PATH}")
         return
 
     if not os.path.isdir(MFLUX_SITE_PACKAGES):
-        print(f"mflux site-packages not found: {MFLUX_SITE_PACKAGES}")
+        logger.warning(f"mflux site-packages not found: {MFLUX_SITE_PACKAGES}")
         return
 
     # Append mflux site-packages (not insert - avoid overriding venv's numpy)
@@ -655,7 +654,7 @@ def load_image_model():
         sys.path.append(MFLUX_SITE_PACKAGES)
 
     image_model_loading = True
-    print(f"Loading image model from {MFLUX_MODEL_PATH}...")
+    logger.info(f"Loading image model from {MFLUX_MODEL_PATH}...")
     start = time.time()
 
     try:
@@ -666,9 +665,9 @@ def load_image_model():
             model_path=MFLUX_MODEL_PATH,
         )
         elapsed = time.time() - start
-        print(f"Image model loaded in {elapsed:.2f}s")
+        logger.info(f"Image model loaded in {elapsed:.2f}s")
     except Exception as e:
-        print(f"Failed to load image model: {e}")
+        logger.error(f"Failed to load image model: {e}")
         image_model = None
     finally:
         image_model_loading = False
@@ -679,20 +678,20 @@ def load_vision_model():
     global vision_model, vision_processor, vision_config, vision_model_loading
 
     if not os.path.isdir(VISION_MODEL_PATH):
-        print(f"Vision model not available (USB not mounted?): {VISION_MODEL_PATH}")
+        logger.warning(f"Vision model not available (USB not mounted?): {VISION_MODEL_PATH}")
         return
 
     vision_model_loading = True
-    print(f"Loading vision model from {VISION_MODEL_PATH}...")
+    logger.info(f"Loading vision model from {VISION_MODEL_PATH}...")
     start = time.time()
 
     try:
         vision_model, vision_processor = vlm_load(VISION_MODEL_PATH)
         vision_config = vlm_load_config(VISION_MODEL_PATH)
         elapsed = time.time() - start
-        print(f"Vision model loaded in {elapsed:.2f}s")
+        logger.info(f"Vision model loaded in {elapsed:.2f}s")
     except Exception as e:
-        print(f"Failed to load vision model: {e}")
+        logger.error(f"Failed to load vision model: {e}")
         vision_model = None
         vision_processor = None
         vision_config = None
@@ -709,7 +708,7 @@ def convert_wav_to_ogg(wav_path: str, ogg_path: str) -> bool:
         )
         return result.returncode == 0
     except Exception as e:
-        print(f"WAV->OGG conversion failed: {e}")
+        logger.error(f"WAV->OGG conversion failed: {e}")
         return False
 
 
@@ -853,6 +852,7 @@ def transcribe(req: TranscribeRequest):
     if text:
         save_to_history(req.path, text, latency_ms, audio_duration_ms, current_model_name)
 
+    logger.info(f"ASR: {Path(req.path).name}, {len(text)}ch, {latency_ms:.0f}ms, audio={audio_duration_ms:.0f}ms")
     return TranscribeResponse(text=text, latency_ms=latency_ms)
 
 
@@ -1098,6 +1098,8 @@ def synthesize(req: SynthesizeRequest):
             model_name=tts_model_name
         )
 
+        logger.info(f"TTS: {len(req.text)}ch, voice={req.voice}, lang={req.language}, {latency_ms:.0f}ms, audio={audio_duration_ms:.0f}ms")
+
         return JSONResponse({
             "status": "ok",
             "audio_url": f"/tts_audio/{final_file.name}",
@@ -1114,6 +1116,7 @@ def synthesize(req: SynthesizeRequest):
         raise
     except Exception as e:
         latency_ms = (time.time() - start) * 1000
+        logger.error(f"TTS error: {e}")
         raise HTTPException(status_code=500, detail=f"TTS generation failed: {str(e)}")
 
 
@@ -1206,10 +1209,10 @@ def _synthesize_file_worker(src_path: Path, out_path: Path, language: str, voice
                 segment_files.append(seg_file)
             else:
                 errors += 1
-                print(f"  file tts [{i+1}/{len(segments)}] ERROR: no output file")
+                logger.error(f"TTS file [{i+1}/{len(segments)}] ERROR: no output file")
         except Exception as e:
             errors += 1
-            print(f"  file tts [{i+1}/{len(segments)}] ERROR: {e}")
+            logger.error(f"TTS file [{i+1}/{len(segments)}] ERROR: {e}")
 
         job["done"] = i + 1
         job["errors"] = errors
@@ -1255,7 +1258,7 @@ def _synthesize_file_worker(src_path: Path, out_path: Path, language: str, voice
         "elapsed": round(total_elapsed, 2),
         "audio_duration_ms": round(audio_duration_ms, 2),
     })
-    print(f"  File TTS done: {len(segments)} segments, {errors} errors, {total_elapsed:.1f}s -> {out_path}")
+    logger.info(f"TTS file done: {len(segments)} segments, {errors} errors, {total_elapsed:.1f}s -> {out_path}")
 
 
 @app.post("/synthesize/file")
@@ -1391,7 +1394,7 @@ def post_translate(req: TranslateRequest):
         ))
         # Save to history
         save_translate_history(text, translation, req.source, req.target, elapsed * 1000)
-        print(f"  [{req.source}->{req.target}] {len(text)}ch -> {len(translation)}ch in {elapsed:.2f}s")
+        logger.info(f"Translate: [{req.source}->{req.target}] {len(text)}ch -> {len(translation)}ch in {elapsed:.2f}s")
     return TranslateResponse(data=TranslateResponseData(translations=results))
 
 
@@ -1418,7 +1421,7 @@ def get_translate(
             detectedSourceLanguage=source,
         ))
         save_translate_history(text, translation, source, target, elapsed * 1000)
-        print(f"  [{source}->{target}] {len(text)}ch -> {len(translation)}ch in {elapsed:.2f}s")
+        logger.info(f"Translate: [{source}->{target}] {len(text)}ch -> {len(translation)}ch in {elapsed:.2f}s")
     return TranslateResponse(data=TranslateResponseData(translations=results))
 
 
@@ -1524,7 +1527,7 @@ def generate_image(req: ImageGenRequest):
     output_file = IMAGE_OUTPUT_DIR / f"img_{file_id}.png"
 
     try:
-        print(f"Image gen: {width}x{height}, steps={req.steps}, seed={req.seed}")
+        logger.info(f"Image gen start: {width}x{height}, steps={req.steps}, seed={req.seed}, prompt={req.prompt[:80]}")
 
         with _gpu_lock:
             image = image_model.generate_image(
@@ -1547,7 +1550,7 @@ def generate_image(req: ImageGenRequest):
         save_image_history(req.prompt, str(output_file), latency_ms,
                            f"{width}x{height}", seed=req.seed, steps=req.steps)
 
-        print(f"Image gen done: {latency_ms:.0f}ms -> {output_file.name}")
+        logger.info(f"Image gen done: {latency_ms:.0f}ms -> {output_file.name}")
 
         return {
             "status": "ok",
@@ -1562,7 +1565,7 @@ def generate_image(req: ImageGenRequest):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Image gen error: {e}")
+        logger.error(f"Image gen error: {e}")
         raise HTTPException(500, f"Image generation failed: {str(e)}")
 
 @app.get("/image_output/{filename}")
@@ -1870,29 +1873,32 @@ async def get_log_histogram():
 async def stream_logs():
     """Stream log file in real-time (tail -f style via SSE)."""
     async def _generate():
-        # Send last 100 lines first
+        # Send last 200 lines first
         lines = []
         if LOG_FILE.exists():
             try:
-                with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
-                    lines = f.readlines()
+                with open(LOG_FILE, "rb") as f:
+                    raw = f.read()
+                    lines = raw.decode("utf-8", errors="replace").splitlines()
             except Exception:
                 pass
-        for line in lines[-100:]:
-            yield f"data: {json.dumps(line.rstrip())}\n\n"
-        # Then tail for new lines
+        for line in lines[-200:]:
+            yield f"data: {json.dumps(line)}\n\n"
+        # Tail for new lines using binary seek (reliable byte offsets)
         last_pos = LOG_FILE.stat().st_size if LOG_FILE.exists() else 0
         while True:
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
             try:
                 size = LOG_FILE.stat().st_size
                 if size > last_pos:
-                    with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
+                    with open(LOG_FILE, "rb") as f:
                         f.seek(last_pos)
-                        new_lines = f.readlines()
+                        chunk = f.read()
                         last_pos = f.tell()
+                    new_lines = chunk.decode("utf-8", errors="replace").splitlines()
                     for line in new_lines:
-                        yield f"data: {json.dumps(line.rstrip())}\n\n"
+                        if line.strip():
+                            yield f"data: {json.dumps(line)}\n\n"
                 elif size < last_pos:
                     # File was rotated
                     last_pos = 0
