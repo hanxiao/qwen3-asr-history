@@ -2271,10 +2271,8 @@
                     usbRow.style.display = 'none';
                 }
 
-                // Queue bar (waiting + running)
-                const waiting = g.gpu_queue_waiting || 0;
-                const running = g.gpu_lock_held ? 1 : 0;
-                const queueTotal = waiting + running;
+                // Queue bar (total in-flight inference requests)
+                const queueTotal = g.gpu_inflight || 0;
                 const maxQueue = 5; // scale bar relative to 5
                 const queuePct = Math.min(100, Math.round(queueTotal / maxQueue * 100));
                 const queueBar = document.getElementById('queue-bar');

@@ -17,7 +17,7 @@ import threading
 import re
 import logging
 import logging.handlers
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -151,7 +151,19 @@ VISION_MODEL_PATH = "/Volumes/One Touch/ai-models/jinaai/jina-vlm-mlx"
 _gpu_lock = threading.Lock()
 _gpu_request_count = 0
 _gpu_queue_waiting = 0  # number of threads waiting to acquire _gpu_lock
+_gpu_inflight = 0  # total in-flight inference requests (from HTTP entry to response)
 _GPU_CACHE_CLEAR_INTERVAL = 20
+
+
+@contextmanager
+def _track_request():
+    """Track an in-flight inference request for the queue display."""
+    global _gpu_inflight
+    _gpu_inflight += 1
+    try:
+        yield
+    finally:
+        _gpu_inflight -= 1
 
 
 class _gpu_queue:
@@ -280,6 +292,24 @@ async def validation_exception_handler(request, exc):
     logger.warning(f"Validation error on {request.url.path}: {detail}")
     return JSONResponse(status_code=422, content={"detail": detail})
 
+
+# Paths that perform GPU inference - tracked for queue display
+_INFERENCE_PATHS = {
+    "/transcribe", "/synthesize", "/synthesize_file",
+    "/translate", "/api/image/generate",
+    "/v1/chat/completions", "/api/vision/analyze",
+}
+
+@app.middleware("http")
+async def track_inflight_requests(request, call_next):
+    global _gpu_inflight
+    if request.url.path in _INFERENCE_PATHS:
+        _gpu_inflight += 1
+        try:
+            return await call_next(request)
+        finally:
+            _gpu_inflight -= 1
+    return await call_next(request)
 
 
 # ============================================================
@@ -679,6 +709,14 @@ def load_translate_model():
 
     try:
         translate_model, translate_tokenizer = mlx_load(translate_model_dir)
+        # TranslateGemma uses <end_of_turn> (token 106) as stop signal, but
+        # the tokenizer only has <eos> (token 1) in eos_token_ids. Without this
+        # patch, mlx_lm.generate runs to max_tokens on every request.
+        eot_id = translate_tokenizer.encode("<end_of_turn>", add_special_tokens=False)
+        if eot_id and hasattr(translate_tokenizer, '_eos_token_ids'):
+            translate_tokenizer._eos_token_ids = translate_tokenizer.eos_token_ids | set(eot_id)
+        elif eot_id:
+            translate_tokenizer.eos_token_ids = translate_tokenizer.eos_token_ids | set(eot_id)
         elapsed = time.time() - start
         logger.info(f"Translate model loaded in {elapsed:.2f}s")
     except Exception as e:
@@ -2073,6 +2111,7 @@ async def get_gpu_stats():
     # Queue count is live, not cached
     stats["gpu_queue_waiting"] = _gpu_queue_waiting
     stats["gpu_lock_held"] = _gpu_lock.locked()
+    stats["gpu_inflight"] = _gpu_inflight
     stats["uptime_s"] = int(time.time() - _SERVER_START_TIME)
     return stats
 
