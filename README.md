@@ -14,7 +14,7 @@ uv run bin/server.py
 # http://127.0.0.1:18321
 ```
 
-Dashboard at `http://127.0.0.1:18321/history`
+Dashboard at `http://127.0.0.1:18321/` (also available at `/history`)
 
 ## Models
 
@@ -72,24 +72,50 @@ curl -X POST http://127.0.0.1:18321/api/image/generate \
 # -> {"image_url": "/image_output/img_xxx.png", "latency_ms": 28000}
 ```
 
-### Vision (Image Understanding)
+### Vision (OpenAI-compatible)
+
+Drop-in replacement for OpenAI's multimodal chat completions. Works with any client that supports the OpenAI API (LangChain, OpenAI SDK, LiteLLM, etc).
+
 ```bash
-curl -X POST http://127.0.0.1:18321/api/vision/analyze \
+# base64 image
+curl -X POST http://127.0.0.1:18321/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"image": "/path/to/image.png", "prompt": "Describe this image.", "max_tokens": 512}'
-# -> {"response": "...", "latency_ms": 2100}
+  -d '{
+    "model": "jinaai/jina-vlm-mlx",
+    "messages": [
+      {"role": "user", "content": [
+        {"type": "text", "text": "Describe this image."},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBOR..."}}
+      ]}
+    ],
+    "max_tokens": 512
+  }'
+
+# local file path
+curl -X POST http://127.0.0.1:18321/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "jinaai/jina-vlm-mlx",
+    "messages": [
+      {"role": "user", "content": [
+        {"type": "text", "text": "What is in this image?"},
+        {"type": "image_url", "image_url": {"url": "/path/to/image.png"}}
+      ]}
+    ]
+  }'
 ```
 
-Upload images via `POST /api/vision/upload` (multipart form).
+`GET /v1/models` lists loaded models. Upload images via `POST /api/vision/upload` (multipart form).
 
 ## Dashboard
 
-Three-column layout: sidebar (services, GPU/disk/USB stats, log chart, theme toggle) | history | compose panel.
+Three-column layout: sidebar (services, GPU/disk/USB/queue stats, log chart, theme toggle) | history | compose panel.
 
 - Per-service pause/resume/restart controls
-- Calendar-based history navigation with sortable columns
-- Real-time GPU utilization, memory, disk, and USB monitoring
-- Live server log streaming
+- Calendar-based history navigation with bidirectional sort
+- Real-time GPU utilization, memory, disk, USB, and inference queue monitoring
+- Live server log streaming (SSE)
+- New-item flash notification on sidebar service rows
 - Light/dark/auto theme
 
 ## OpenClaw Integration

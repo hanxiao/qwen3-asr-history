@@ -4,6 +4,7 @@ MLX Serving - Unified ASR + TTS + Translate server.
 Keeps models loaded in memory for fast inference.
 Saves transcription/synthesis/translation history to ~/Documents/qwen3-asr-history/history/
 """
+import base64
 import gc
 import os
 import sys
@@ -149,7 +150,20 @@ VISION_MODEL_PATH = "/Volumes/One Touch/ai-models/jinaai/jina-vlm-mlx"
 # simultaneously, causing Metal OOM crashes.
 _gpu_lock = threading.Lock()
 _gpu_request_count = 0
+_gpu_queue_waiting = 0  # number of threads waiting to acquire _gpu_lock
 _GPU_CACHE_CLEAR_INTERVAL = 20
+
+
+class _gpu_queue:
+    """Context manager that tracks queue depth around _gpu_lock."""
+    def __enter__(self):
+        global _gpu_queue_waiting
+        _gpu_queue_waiting += 1
+        _gpu_lock.acquire()
+        _gpu_queue_waiting -= 1
+        return self
+    def __exit__(self, *args):
+        _gpu_lock.release()
 
 
 def _maybe_clear_gpu_cache():
@@ -165,6 +179,20 @@ def _maybe_clear_gpu_cache():
 
 # Track background file translations
 translate_file_jobs: dict[str, dict] = {}
+
+# Track background file synthesis jobs
+file_synth_jobs: dict[str, dict] = {}
+
+_JOB_MAX_AGE = 3600  # prune completed jobs older than 1h
+
+def _prune_jobs(jobs: dict):
+    """Remove completed jobs older than _JOB_MAX_AGE seconds."""
+    now = time.time()
+    stale = [k for k, v in jobs.items()
+             if v.get("status") in ("done", "error")
+             and now - v.get("_ts", 0) > _JOB_MAX_AGE]
+    for k in stale:
+        del jobs[k]
 
 SUPPORTED_TRANSLATE_LANGS = {
     "af": "Afrikaans", "am": "Amharic", "ar": "Arabic", "az": "Azerbaijani",
@@ -251,9 +279,6 @@ async def validation_exception_handler(request, exc):
     logger.warning(f"Validation error on {request.url.path}: {detail}")
     return JSONResponse(status_code=422, content={"detail": detail})
 
-
-# Track background file synthesis jobs
-file_synth_jobs: dict[str, dict] = {}
 
 
 # ============================================================
@@ -420,7 +445,7 @@ def save_vision_history(prompt: str, image_path: str, response_text: str,
 def translate_text(text: str, source: str, target: str) -> tuple[str, float]:
     """Translate a single text. Returns (translation, elapsed_seconds).
     Thread-safe: uses _gpu_lock to serialize Metal GPU access."""
-    with _gpu_lock:
+    with _gpu_queue():
         return _translate_text_impl(text, source, target)
 
 
@@ -555,6 +580,32 @@ class VisionRequest(BaseModel):
     image: str  # local file path or uploaded filename
     prompt: str = "What is in this image? Describe everything you can see."
     max_tokens: int = 512
+
+
+# ============================================================
+# OpenAI-compatible Chat Completion models
+# ============================================================
+
+class ChatImageUrl(BaseModel):
+    url: str
+    detail: str = "auto"
+
+class ChatContentPart(BaseModel):
+    type: str  # "text" or "image_url"
+    text: str | None = None
+    image_url: ChatImageUrl | None = None
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str | list[ChatContentPart]
+
+class ChatCompletionRequest(BaseModel):
+    model: str = "jinaai/jina-vlm-mlx"
+    messages: list[ChatMessage]
+    max_tokens: int = 512
+    temperature: float | None = None
+    top_p: float | None = None
+    stream: bool = False
 
 
 def load_model(model_name: str = None):
@@ -809,13 +860,15 @@ def transcribe(req: TranscribeRequest):
 
     start = time.time()
     wav_path = None
+    txt_file = None
     try:
         wav_path = convert_to_wav(req.path)
 
         with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
             output_path = f.name.replace(".txt", "")
+        txt_file = output_path + ".txt"
 
-        with _gpu_lock:
+        with _gpu_queue():
             segments = generate_fn(
                 model=model,
                 audio=wav_path,
@@ -826,11 +879,9 @@ def transcribe(req: TranscribeRequest):
             )
             _maybe_clear_gpu_cache()
 
-        txt_file = output_path + ".txt"
         if os.path.exists(txt_file):
             with open(txt_file, "r") as f:
                 text = f.read().strip()
-            os.unlink(txt_file)
         else:
             if segments:
                 text = " ".join(s.get("text", "") for s in segments if isinstance(s, dict))
@@ -845,6 +896,8 @@ def transcribe(req: TranscribeRequest):
     finally:
         if wav_path and os.path.exists(wav_path):
             os.unlink(wav_path)
+        if txt_file and os.path.exists(txt_file):
+            os.unlink(txt_file)
 
     latency_ms = (time.time() - start) * 1000
     audio_duration_ms = get_audio_duration(req.path)
@@ -1051,7 +1104,7 @@ def synthesize(req: SynthesizeRequest):
         if instruct:
             gen_kwargs["instruct"] = instruct
 
-        with _gpu_lock:
+        with _gpu_queue():
             generate_audio(**gen_kwargs)
             _maybe_clear_gpu_cache()
 
@@ -1190,7 +1243,7 @@ def _synthesize_file_worker(src_path: Path, out_path: Path, language: str, voice
             )
             if file_instruct:
                 seg_kwargs["instruct"] = file_instruct
-            with _gpu_lock:
+            with _gpu_queue():
                 generate_audio(**seg_kwargs)
                 _maybe_clear_gpu_cache()
 
@@ -1277,6 +1330,7 @@ async def synthesize_file(req: SynthesizeFileRequest):
         out_path = src_path.with_suffix(ext)
 
     out_key = str(out_path)
+    _prune_jobs(file_synth_jobs)
     file_synth_jobs[out_key] = {
         "status": "running",
         "segments": 0,
@@ -1284,6 +1338,7 @@ async def synthesize_file(req: SynthesizeFileRequest):
         "errors": 0,
         "elapsed": 0,
         "audio_duration_ms": 0,
+        "_ts": time.time(),
     }
 
     thread = threading.Thread(
@@ -1444,7 +1499,8 @@ def translate_file_endpoint(req: FileTranslateRequest):
         out_path = src_path.with_suffix(f".{req.target}")
 
     out_key = str(out_path)
-    translate_file_jobs[out_key] = {"status": "running", "lines": 0, "done": 0, "errors": 0, "elapsed": 0}
+    _prune_jobs(translate_file_jobs)
+    translate_file_jobs[out_key] = {"status": "running", "lines": 0, "done": 0, "errors": 0, "elapsed": 0, "_ts": time.time()}
 
     thread = threading.Thread(
         target=_translate_file_worker,
@@ -1529,7 +1585,7 @@ def generate_image(req: ImageGenRequest):
     try:
         logger.info(f"Image gen start: {width}x{height}, steps={req.steps}, seed={req.seed}, prompt={req.prompt[:80]}")
 
-        with _gpu_lock:
+        with _gpu_queue():
             image = image_model.generate_image(
                 seed=req.seed if req.seed is not None else int(time.time()) % (2**31),
                 prompt=req.prompt,
@@ -1596,7 +1652,187 @@ async def get_image_history():
 
 
 # ============================================================
-# Vision endpoints
+# OpenAI-compatible Chat Completions API
+# ============================================================
+
+def _resolve_base64_image(data_uri: str) -> str:
+    """Decode a data:image/...;base64,... URI to a temp file. Returns file path."""
+    # Format: data:image/png;base64,iVBOR...
+    header, _, b64data = data_uri.partition(",")
+    if not b64data:
+        raise ValueError("Invalid data URI: no base64 data after comma")
+    # Extract extension from mime type
+    ext = ".png"
+    if "image/" in header:
+        mime = header.split("image/")[1].split(";")[0]
+        ext_map = {"png": ".png", "jpeg": ".jpg", "jpg": ".jpg", "gif": ".gif",
+                    "webp": ".webp", "bmp": ".bmp", "tiff": ".tiff"}
+        ext = ext_map.get(mime, f".{mime}")
+    VISION_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    dest = VISION_OUTPUT_DIR / f"vision_{uuid.uuid4().hex[:12]}{ext}"
+    dest.write_bytes(base64.b64decode(b64data))
+    return str(dest)
+
+
+def _extract_chat_content(messages: list[ChatMessage]) -> tuple[str, str | None]:
+    """Extract text prompt and image path from OpenAI-format messages.
+    Returns (prompt_text, image_path_or_None)."""
+    text_parts = []
+    image_path = None
+
+    for msg in messages:
+        if msg.role == "system":
+            # Prepend system message to prompt
+            if isinstance(msg.content, str):
+                text_parts.insert(0, msg.content)
+            continue
+        if msg.role != "user":
+            continue
+
+        if isinstance(msg.content, str):
+            text_parts.append(msg.content)
+        elif isinstance(msg.content, list):
+            for part in msg.content:
+                if part.type == "text" and part.text:
+                    text_parts.append(part.text)
+                elif part.type == "image_url" and part.image_url:
+                    url = part.image_url.url
+                    if image_path is not None:
+                        continue  # only use first image
+                    if url.startswith("data:"):
+                        image_path = _resolve_base64_image(url)
+                    elif url.startswith("/") or url.startswith("~"):
+                        # Local file path
+                        expanded = os.path.expanduser(url)
+                        if os.path.exists(expanded):
+                            image_path = expanded
+                        else:
+                            raise ValueError(f"Image file not found: {url}")
+                    elif url.startswith("http://") or url.startswith("https://"):
+                        raise ValueError(
+                            "HTTP image URLs not supported - use base64 data URI or local file path"
+                        )
+                    else:
+                        # Try as filename in VISION_OUTPUT_DIR
+                        candidate = VISION_OUTPUT_DIR / url
+                        if candidate.exists():
+                            image_path = str(candidate)
+                        elif os.path.exists(url):
+                            image_path = url
+                        else:
+                            raise ValueError(f"Image not found: {url}")
+
+    prompt = "\n".join(text_parts) if text_parts else "Describe this image."
+    return prompt, image_path
+
+
+@app.post("/v1/chat/completions")
+def chat_completions(req: ChatCompletionRequest):
+    """OpenAI-compatible chat completions endpoint for vision model."""
+    if req.stream:
+        raise HTTPException(400, "Streaming not supported - set stream=false")
+    if vision_server_paused:
+        raise HTTPException(503, "Vision server is paused")
+    if vision_model is None:
+        raise HTTPException(503, "Vision model not loaded")
+
+    try:
+        prompt, image_path = _extract_chat_content(req.messages)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    if image_path is None:
+        raise HTTPException(400, "No image provided in messages. Include an image_url content part.")
+
+    # Copy to vision_output if not already there
+    VISION_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    src = Path(image_path)
+    if VISION_OUTPUT_DIR not in src.resolve().parents:
+        dest = VISION_OUTPUT_DIR / f"vision_{uuid.uuid4().hex[:12]}{src.suffix}"
+        shutil.copy2(image_path, dest)
+        image_path = str(dest)
+
+    start = time.time()
+    try:
+        formatted = apply_chat_template(
+            vision_processor, vision_config, prompt, num_images=1
+        )
+        with _gpu_queue():
+            result = vlm_generate(
+                vision_model, vision_processor,
+                prompt=formatted, image=image_path,
+                max_tokens=req.max_tokens, verbose=False,
+            )
+            _maybe_clear_gpu_cache()
+
+        latency_ms = (time.time() - start) * 1000
+        response_text = result.text if hasattr(result, 'text') else str(result)
+        prompt_tokens = getattr(result, 'prompt_tokens', 0)
+        generation_tokens = getattr(result, 'generation_tokens', 0)
+        generation_tps = getattr(result, 'generation_tps', 0.0)
+
+        # Determine finish reason
+        finish_reason = "stop"
+        if generation_tokens >= req.max_tokens:
+            finish_reason = "length"
+
+        save_vision_history(
+            prompt=prompt,
+            image_path=image_path,
+            response_text=response_text,
+            latency_ms=latency_ms,
+            prompt_tokens=prompt_tokens,
+            generation_tokens=generation_tokens,
+            generation_tps=generation_tps,
+        )
+
+        logger.info(f"Vision: {len(prompt)}ch prompt, {len(response_text)}ch response in {latency_ms:.0f}ms")
+
+        return {
+            "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": vision_model_name,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": response_text,
+                    },
+                    "finish_reason": finish_reason,
+                }
+            ],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": generation_tokens,
+                "total_tokens": prompt_tokens + generation_tokens,
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Chat completion error: {e}", exc_info=True)
+        raise HTTPException(500, f"Chat completion failed: {str(e)}")
+
+
+@app.get("/v1/models")
+async def list_models():
+    """OpenAI-compatible model listing endpoint."""
+    models = []
+    if vision_model is not None:
+        models.append({
+            "id": vision_model_name,
+            "object": "model",
+            "created": 0,
+            "owned_by": "local",
+        })
+    return {"object": "list", "data": models}
+
+
+# ============================================================
+# Vision endpoints (internal dashboard API)
 # ============================================================
 
 @app.get("/api/vision/status")
@@ -1653,7 +1889,7 @@ def analyze_vision(req: VisionRequest):
         formatted = apply_chat_template(
             vision_processor, vision_config, req.prompt, num_images=1
         )
-        with _gpu_lock:
+        with _gpu_queue():
             result = vlm_generate(
                 vision_model, vision_processor,
                 prompt=formatted, image=image_path,
@@ -1832,7 +2068,11 @@ def _get_gpu_stats() -> dict:
 
 @app.get("/api/gpu")
 async def get_gpu_stats():
-    return _get_gpu_stats()
+    stats = _get_gpu_stats()
+    # Queue count is live, not cached
+    stats["gpu_queue_waiting"] = _gpu_queue_waiting
+    stats["gpu_lock_held"] = _gpu_lock.locked()
+    return stats
 
 
 # ============================================================
@@ -1873,13 +2113,20 @@ async def get_log_histogram():
 async def stream_logs():
     """Stream log file in real-time (tail -f style via SSE)."""
     async def _generate():
-        # Send last 200 lines first
+        # Send last 200 lines via backward seek (avoids reading entire file)
         lines = []
         if LOG_FILE.exists():
             try:
+                size = LOG_FILE.stat().st_size
+                # Read last 64KB at most for tail
+                chunk_size = min(size, 64 * 1024)
                 with open(LOG_FILE, "rb") as f:
+                    f.seek(max(0, size - chunk_size))
                     raw = f.read()
                     lines = raw.decode("utf-8", errors="replace").splitlines()
+                    # Drop first partial line if we seeked mid-file
+                    if size > chunk_size and lines:
+                        lines = lines[1:]
             except Exception:
                 pass
         for line in lines[-200:]:
@@ -1916,6 +2163,7 @@ async def stream_logs():
 STATIC_DIR = Path(__file__).parent / "static"
 
 
+@app.get("/", response_class=HTMLResponse)
 @app.get("/history", response_class=HTMLResponse)
 async def history_page():
     """Serve the history viewer HTML page from static/index.html."""

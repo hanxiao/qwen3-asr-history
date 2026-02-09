@@ -73,6 +73,8 @@
         .service-row:last-child { border-bottom: none; }
         .service-row:hover { background: var(--sb-hover); }
         .service-row.active { background: var(--sb-active-bg); border-left: 2px solid var(--accent); }
+        @keyframes svc-flash { 0%,100% { box-shadow: inset 0 0 0 0 transparent; } 20%,80% { box-shadow: inset 200px 0 0 0 var(--accent-bg); } }
+        .service-row.new-item { animation: svc-flash 3s ease; }
         .svc-header-actions { margin-left: auto; display: none; gap: 2px; }
         .service-row.expanded .svc-header-actions { display: flex; }
         .icon-btn { background: none; border: 1px solid transparent; color: var(--sb-text-3); font-size: 10px; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0; line-height: 1; transition: all 0.15s; }
@@ -115,7 +117,7 @@
         .gpu-stats { padding: 8px 10px; border-top: 1px solid var(--sb-border); }
         .gpu-stats-title { font-size: 9px; font-weight: 500; color: var(--sb-text-3); text-transform: uppercase; letter-spacing: 0.3px; margin-bottom: 6px; }
         .gpu-bar-row { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
-        .gpu-bar-label { width: 28px; flex-shrink: 0; color: var(--sb-text-3); font-size: 8px; text-transform: uppercase; letter-spacing: 0.3px; }
+        .gpu-bar-label { width: 32px; flex-shrink: 0; color: var(--sb-text-3); font-size: 8px; text-transform: uppercase; letter-spacing: 0.3px; }
         .gpu-bar-track { flex: 1; height: 3px; background: var(--sb-bar-track); border-radius: 2px; overflow: hidden; }
         .gpu-bar-fill { height: 100%; border-radius: 2px; transition: width 0.6s ease; background: var(--sb-bar-idle); }
         .gpu-bar-fill.hot { background: #e25f4a; }
@@ -439,6 +441,11 @@
                         <div class="gpu-bar-track"><div class="gpu-bar-fill" id="usb-bar" style="width:0%"></div></div>
                         <span class="gpu-bar-value" id="usb-val">--</span>
                     </div>
+                    <div class="gpu-bar-row">
+                        <span class="gpu-bar-label">queue</span>
+                        <div class="gpu-bar-track"><div class="gpu-bar-fill cool" id="queue-bar" style="width:0%"></div></div>
+                        <span class="gpu-bar-value" id="queue-val">0</span>
+                    </div>
                 </div>
 
                 <div class="log-chart-wrap" onclick="switchTab('log')" title="Server logs - last 1h">
@@ -707,6 +714,16 @@
             vision: { field: 'time', ascending: false }
         };
         let _lastHistoryData = { tts: [], translate: [], image: [], vision: [] };
+        let _prevHistoryCounts = { asr: -1, tts: -1, translate: -1, image: -1, vision: -1 };
+
+        function flashServiceRow(service) {
+            const row = document.getElementById('svc-row-' + service);
+            if (!row) return;
+            row.classList.remove('new-item');
+            void row.offsetWidth; // force reflow to restart animation
+            row.classList.add('new-item');
+            setTimeout(() => row.classList.remove('new-item'), 3000);
+        }
 
         function sortHistoryRecords(records, field, ascending) {
             const sorted = [...records].sort((a, b) => {
@@ -1088,6 +1105,8 @@
 
             const hadNewRecords = records.length > lastRecordCount;
             lastRecordCount = records.length;
+            if (hadNewRecords && _prevHistoryCounts.asr >= 0) flashServiceRow('asr');
+            _prevHistoryCounts.asr = records.length;
 
             const now = new Date(); const today = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
             if (date === today) {
@@ -1144,33 +1163,54 @@
 
         const audioContext = new (window.AudioContext || window.webkitAudioContext)();
         const waveformCache = new Map();
+        const WAVEFORM_CACHE_MAX = 200;
+
+        function waveformCacheSet(url, data) {
+            if (waveformCache.size >= WAVEFORM_CACHE_MAX) {
+                // Evict oldest entry (first key in Map insertion order)
+                const oldest = waveformCache.keys().next().value;
+                waveformCache.delete(oldest);
+            }
+            waveformCacheSet(url, data);
+        }
 
         async function loadWaveform(transcriptEl) {
             const url = transcriptEl.dataset.audioUrl;
             const container = transcriptEl.querySelector('.waveform-container');
+            if (!container) return;
             const canvas = container.querySelector('canvas');
             const loading = container.querySelector('.waveform-loading');
             const timeDisplay = container.querySelector('.waveform-time');
 
             try {
                 let waveformData = waveformCache.get(url);
+                if (waveformData === false) {
+                    if (loading) loading.textContent = 'audio not available';
+                    return;
+                }
                 let duration = 0;
                 if (!waveformData) {
                     const response = await fetch(url);
+                    if (!response.ok) {
+                        waveformCacheSet(url, false);
+                        if (loading) loading.textContent = 'audio not available';
+                        return;
+                    }
                     const arrayBuffer = await response.arrayBuffer();
                     const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
                     waveformData = extractWaveform(audioBuffer, 100);
                     waveformData.duration = audioBuffer.duration;
-                    waveformCache.set(url, waveformData);
+                    waveformCacheSet(url, waveformData);
                 }
                 duration = waveformData.duration || 0;
-                if (duration > 0) {
+                if (duration > 0 && timeDisplay) {
                     timeDisplay.textContent = '0:00 / ' + duration.toFixed(1) + 's';
                 }
                 drawWaveform(canvas, waveformData, 0);
-                loading.style.display = 'none';
+                if (loading) loading.style.display = 'none';
             } catch (e) {
-                loading.textContent = 'waveform unavailable';
+                waveformCacheSet(url, false);
+                if (loading) loading.textContent = 'audio not available';
             }
         }
 
@@ -1193,9 +1233,14 @@
             const ctx = canvas.getContext('2d');
             const dpr = window.devicePixelRatio || 1;
             const rect = canvas.getBoundingClientRect();
-            canvas.width = rect.width * dpr;
-            canvas.height = rect.height * dpr;
-            ctx.scale(dpr, dpr);
+            const needW = Math.round(rect.width * dpr);
+            const needH = Math.round(rect.height * dpr);
+            // Only reallocate canvas buffer when dimensions actually change
+            if (canvas.width !== needW || canvas.height !== needH) {
+                canvas.width = needW;
+                canvas.height = needH;
+                ctx.scale(dpr, dpr);
+            }
 
             const width = rect.width;
             const height = rect.height;
@@ -1242,9 +1287,12 @@
                 return;
             }
 
-            // Stop previous audio
+            // Stop previous audio and release resources
             if (currentAudio) {
                 currentAudio.pause();
+                currentAudio.removeAttribute('src');
+                currentAudio.load(); // release network/memory resources
+                currentAudio = null;
                 document.querySelectorAll('button.play-btn').forEach(b => {
                     if (b.querySelector('.icon-play')) b.querySelector('.icon-play').style.display = 'block';
                     if (b.querySelector('.icon-pause')) b.querySelector('.icon-pause').style.display = 'none';
@@ -1255,7 +1303,7 @@
                    const tEl = c.closest('.transcript') || c.closest('.tts-item');
                    const u = tEl ? tEl.dataset.audioUrl : null;
                    const wd = waveformCache.get(u);
-                   if (wd) drawWaveform(c, wd, 0); 
+                   if (wd) drawWaveform(c, wd, 0);
                 });
             }
 
@@ -1438,6 +1486,8 @@
         async function loadTTSHistory() {
             const res = await fetch('/api/tts/history');
             const records = await res.json();
+            if (records.length > _prevHistoryCounts.tts && _prevHistoryCounts.tts >= 0) flashServiceRow('tts');
+            _prevHistoryCounts.tts = records.length;
             _lastHistoryData.tts = records;
             renderTTSHistory(sortHistoryRecords(records, historySortState.tts.field, historySortState.tts.ascending));
         }
@@ -1614,6 +1664,8 @@
         async function loadTranslateHistory() {
             const res = await fetch('/api/translate/history');
             const records = await res.json();
+            if (records.length > _prevHistoryCounts.translate && _prevHistoryCounts.translate >= 0) flashServiceRow('translate');
+            _prevHistoryCounts.translate = records.length;
             _lastHistoryData.translate = records;
             renderTranslateHistory(sortHistoryRecords(records, historySortState.translate.field, historySortState.translate.ascending));
         }
@@ -1763,6 +1815,8 @@
         async function loadImageHistory() {
             const res = await fetch('/api/image/history');
             const records = await res.json();
+            if (records.length > _prevHistoryCounts.image && _prevHistoryCounts.image >= 0) flashServiceRow('image');
+            _prevHistoryCounts.image = records.length;
             _lastHistoryData.image = records;
             renderImageHistory(sortHistoryRecords(records, historySortState.image.field, historySortState.image.ascending));
         }
@@ -1896,6 +1950,8 @@
         async function loadVisionHistory() {
             const res = await fetch('/api/vision/history');
             const records = await res.json();
+            if (records.length > _prevHistoryCounts.vision && _prevHistoryCounts.vision >= 0) flashServiceRow('vision');
+            _prevHistoryCounts.vision = records.length;
             _lastHistoryData.vision = records;
             renderVisionHistory(sortHistoryRecords(records, historySortState.vision.field, historySortState.vision.ascending));
         }
@@ -2139,6 +2195,17 @@
                 } else {
                     usbRow.style.display = 'none';
                 }
+
+                // Queue bar (waiting + running)
+                const waiting = g.gpu_queue_waiting || 0;
+                const running = g.gpu_lock_held ? 1 : 0;
+                const queueTotal = waiting + running;
+                const maxQueue = 5; // scale bar relative to 5
+                const queuePct = Math.min(100, Math.round(queueTotal / maxQueue * 100));
+                const queueBar = document.getElementById('queue-bar');
+                queueBar.style.width = queuePct + '%';
+                queueBar.className = 'gpu-bar-fill ' + (queueTotal >= 4 ? 'hot' : queueTotal >= 2 ? 'warm' : queueTotal >= 1 ? 'cool' : 'cool');
+                document.getElementById('queue-val').textContent = queueTotal;
             } catch(e) {}
         }
 
@@ -2230,23 +2297,25 @@
             refreshLogChart();
 
             if (currentAudio && !currentAudio.paused) return;
+            // Poll all services so flash triggers even on inactive tabs
+            loadDates();
+            loadTTSHistory();
+            loadTranslateHistory();
+            loadImageHistory();
+            loadVisionHistory();
+            // Update stats for active tab
             const activeTab = document.querySelector('.service-row.active')?.id?.replace('svc-row-', '');
-            if (activeTab === 'asr') {
-                loadDates();
-            } else if (activeTab === 'tts') {
-                loadTTSHistory();
-                updateTTSStats();
-            } else if (activeTab === 'translate') {
-                loadTranslateHistory();
-                updateTranslateStats();
-            } else if (activeTab === 'image') {
-                loadImageHistory();
-                updateImageStats();
-            } else if (activeTab === 'vision') {
-                loadVisionHistory();
-                updateVisionStats();
-            }
+            if (activeTab === 'tts') updateTTSStats();
+            else if (activeTab === 'translate') updateTranslateStats();
+            else if (activeTab === 'image') updateImageStats();
+            else if (activeTab === 'vision') updateVisionStats();
         }, 3000);
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            disconnectLogStream();
+            if (currentAudio) { currentAudio.pause(); currentAudio = null; }
+        });
     </script>
 </body>
 </html>
