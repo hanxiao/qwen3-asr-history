@@ -518,6 +518,12 @@
                             <button class="sort-btn active" onclick="setHistorySort('tts','time',this)">time <svg class="sort-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 15l-6-6-6 6"/></svg></button>
                             <button class="sort-btn" onclick="setHistorySort('tts','latency',this)">latency <svg class="sort-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 15l-6-6-6 6"/></svg></button>
                         </div>
+                        <div class="speed-controls">
+                            <span class="speed-label">speed:</span>
+                            <button class="speed-btn" data-speed="1" onclick="setSpeed(1)">1x</button>
+                            <button class="speed-btn active" data-speed="2" onclick="setSpeed(2)">2x</button>
+                            <button class="speed-btn" data-speed="4" onclick="setSpeed(4)">4x</button>
+                        </div>
                     </div>
                 </div>
                 <div id="tts-history"><div class="empty">no TTS history yet</div></div>
