@@ -103,7 +103,7 @@ AVAILABLE_TTS_MODELS = [
 
 # Han's voice clone model cache
 han_speaker_embedding = None
-han_ref_audio = None
+han_ref_audio_path = None
 han_ref_text = None
 
 # Default TTS model path on USB drive
@@ -667,7 +667,7 @@ def load_model(model_name: str = None):
 def load_tts_model(model_name: str = None):
     """Load TTS model."""
     global tts_model, tts_model_name, tts_model_loading
-    global han_speaker_embedding, han_ref_audio, han_ref_text
+    global han_speaker_embedding, han_ref_audio_path, han_ref_text
 
     if model_name:
         tts_model_name = model_name
@@ -710,13 +710,13 @@ def load_tts_model(model_name: str = None):
                 from mlx_audio.utils import load_audio
                 
                 # Load reference audio and text
-                han_ref_audio = load_audio(ref_audio_path, sample_rate=24000)
+                ref_audio_array = load_audio(ref_audio_path, sample_rate=24000)
                 with open(ref_text_path, "r", encoding="utf-8") as f:
                     han_ref_text = f.read().strip()
                 
                 # Extract embedding
                 han_speaker_embedding = tts_model.extract_speaker_embedding(
-                    han_ref_audio, sr=24000
+                    ref_audio_array, sr=24000
                 )
                 mx.eval(han_speaker_embedding)
                 
@@ -730,10 +730,9 @@ def load_tts_model(model_name: str = None):
                 except Exception as e:
                     logger.warning(f"Failed to cache embedding: {e}")
             
-            # Load reference audio and text for synthesis
-            if han_ref_audio is None or han_ref_text is None:
-                from mlx_audio.utils import load_audio
-                han_ref_audio = load_audio(ref_audio_path, sample_rate=24000)
+            # Store reference file paths for synthesis (generate_audio expects file paths)
+            han_ref_audio_path = ref_audio_path
+            if han_ref_text is None:
                 with open(ref_text_path, "r", encoding="utf-8") as f:
                     han_ref_text = f.read().strip()
         else:
@@ -1201,8 +1200,8 @@ def synthesize(req: SynthesizeRequest):
         
         # Handle Han's voice clone model
         if tts_model_name == "qwen3-tts-1.7B-han":
-            # Use cached ref_audio and ref_text for Han's voice
-            gen_kwargs["ref_audio"] = han_ref_audio
+            # Use ref_audio path and ref_text for Han's voice (generate_audio expects file path)
+            gen_kwargs["ref_audio"] = han_ref_audio_path
             gen_kwargs["ref_text"] = han_ref_text
             # Voice and instruct parameters are ignored for voice cloning
         else:
