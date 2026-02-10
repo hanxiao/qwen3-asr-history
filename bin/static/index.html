@@ -782,6 +782,11 @@
         // ========== ASR state ==========
         let currentDate = null;
         let lastRecordCount = 0;
+        function getLocalToday() {
+            const now = new Date();
+            return `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+        }
+
         let knownDates = [];
         let currentSort = 'time';
         let sortAscending = false;
@@ -842,7 +847,7 @@
             let startDay = firstDay.getDay() - 1; // Monday = 0
             if (startDay < 0) startDay = 6;
             const daysInMonth = new Date(calYear, calMonth + 1, 0).getDate();
-            const today = new Date().toISOString().slice(0, 10);
+            const today = getLocalToday();
             const dates = calAvailableDates[currentTab] || new Set();
             
             for (let i = 0; i < startDay; i++) html += '<div class="cal-day"></div>';
@@ -911,6 +916,19 @@
                 }
             } catch(e) {
                 calAvailableDates[service] = new Set();
+            }
+            // Auto-select today for non-ASR tabs if no date selected yet
+            if (service !== 'asr') {
+                const today = getLocalToday();
+                const dates = calAvailableDates[service] || new Set();
+                const currentDateVar = service === 'tts' ? ttsCurrentDate
+                    : service === 'translate' ? translateCurrentDate
+                    : service === 'image' ? imageCurrentDate
+                    : visionCurrentDate;
+                if (!currentDateVar && dates.has(today)) {
+                    calSelectDate(today);
+                    return; // calSelectDate calls renderCalendar
+                }
             }
             renderCalendar();
         }
@@ -1271,7 +1289,7 @@
                     }
                     const arrayBuffer = await response.arrayBuffer();
                     const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-                    waveformData = extractWaveform(audioBuffer, 100);
+                    waveformData = extractWaveform(audioBuffer, 200);
                     waveformData.duration = audioBuffer.duration;
                     waveformCacheSet(url, waveformData);
                 }
@@ -1320,9 +1338,17 @@
             const width = rect.width;
             const height = rect.height;
             const barWidth = width / data.length;
-            const gap = 1;
+            const gap = Math.max(0.5, barWidth * 0.4);
 
             ctx.clearRect(0, 0, width, height);
+
+            // Center line
+            ctx.beginPath();
+            ctx.moveTo(0, height / 2);
+            ctx.lineTo(width, height / 2);
+            ctx.strokeStyle = '#e0e0e0';
+            ctx.lineWidth = 0.5;
+            ctx.stroke();
 
             data.forEach((val, i) => {
                 const x = i * barWidth;
@@ -2088,7 +2114,7 @@
             try {
                 const res = await fetch('/api/tts/history');
                 const records = await res.json();
-                const today = new Date().toISOString().slice(0, 10);
+                const today = getLocalToday();
                 const todayRecords = records.filter(r => r.timestamp && r.timestamp.startsWith(today));
                 const totalDur = records.reduce((s, r) => s + (r.audio_duration_ms || 0), 0);
                 const todayDur = todayRecords.reduce((s, r) => s + (r.audio_duration_ms || 0), 0);
@@ -2103,7 +2129,7 @@
             try {
                 const res = await fetch('/api/translate/history');
                 const records = await res.json();
-                const today = new Date().toISOString().slice(0, 10);
+                const today = getLocalToday();
                 const todayRecords = records.filter(r => r.timestamp && r.timestamp.startsWith(today));
                 document.getElementById('translate-stat-total').textContent = records.length + ' items';
                 document.getElementById('translate-stat-today').textContent = todayRecords.length + ' items';
@@ -2114,7 +2140,7 @@
             try {
                 const res = await fetch('/api/image/history');
                 const records = await res.json();
-                const today = new Date().toISOString().slice(0, 10);
+                const today = getLocalToday();
                 const todayRecords = records.filter(r => r.timestamp && r.timestamp.startsWith(today));
                 document.getElementById('image-stat-total').textContent = records.length + ' images';
                 document.getElementById('image-stat-today').textContent = todayRecords.length + ' images';
@@ -2125,7 +2151,7 @@
             try {
                 const res = await fetch('/api/vision/history');
                 const records = await res.json();
-                const today = new Date().toISOString().slice(0, 10);
+                const today = getLocalToday();
                 const todayRecords = records.filter(r => r.timestamp && r.timestamp.startsWith(today));
                 document.getElementById('vision-stat-total').textContent = records.length + ' items';
                 document.getElementById('vision-stat-today').textContent = todayRecords.length + ' items';
@@ -2273,11 +2299,11 @@
 
                 // Queue bar (total in-flight inference requests)
                 const queueTotal = g.gpu_inflight || 0;
-                const maxQueue = 5; // scale bar relative to 5
+                const maxQueue = 50;
                 const queuePct = Math.min(100, Math.round(queueTotal / maxQueue * 100));
                 const queueBar = document.getElementById('queue-bar');
                 queueBar.style.width = queuePct + '%';
-                queueBar.className = 'gpu-bar-fill ' + (queueTotal >= 4 ? 'hot' : queueTotal >= 2 ? 'warm' : queueTotal >= 1 ? 'cool' : 'cool');
+                queueBar.className = 'gpu-bar-fill ' + (queueTotal >= 30 ? 'hot' : queueTotal >= 10 ? 'warm' : queueTotal >= 1 ? 'cool' : 'cool');
                 document.getElementById('queue-val').textContent = queueTotal;
 
                 // Sync server start epoch for uptime ticker
