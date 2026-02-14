@@ -249,8 +249,7 @@ async def lifespan(app):
     """Load models in a background thread so /health and /history are available immediately."""
     def _load_and_log(fn, name):
         try:
-            with _gpu_lock:
-                fn()
+            fn()
         except Exception as e:
             logger.error(f"Failed to load {name}: {e}")
 
